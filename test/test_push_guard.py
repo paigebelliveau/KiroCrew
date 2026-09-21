@@ -4556,3 +4556,93 @@ class TestGitResolution:
         pg = _load_push_guard()
         res = pg.run_child([str(tmp_path / launcher), "fetch", "origin", "main&calc&"], None, 5)
         assert res.rc == 126 and b"metacharacters" in res.err
+
+
+class TestPushGuardOutOfPlace:
+    """Out-of-place mode: the gateway fetches base and candidate into a bare mirror it
+    owns and points the guard at that mirror with ``GIT_DIR``, running it read-only
+    against refs it named (``--base-ref``/``--candidate-ref``/``--no-fetch``).
+
+    This pins the end-to-end gateway path. Before the fix, the guard stripped ``GIT_DIR``
+    from its own git children (it is in ``_RELOCATION_VARS``) and ran them in the caller's
+    cwd, so an activated install could never issue SAFE (exit 2 outside a repo, exit 40 in
+    the bare mirror on the branch-reflog / build-record reads). The fix keeps ``GIT_DIR``
+    out-of-place and skips the worktree index + build-record vouching, which do not apply
+    to a fetched candidate ref in a bare mirror.
+    """
+
+    _BASE_REF = "refs/push-verdict/base"
+    _CAND_REF = "refs/push-verdict/candidate"
+
+    def _mirror(self, tmp_path):
+        """Build (work, mirror) where the mirror holds a base ref and a candidate one
+        commit ahead, exactly as the gateway's ``_prime_mirror`` would."""
+        work = str(tmp_path / "work")
+        mirror = str(tmp_path / "mirror.git")
+        os.makedirs(work)
+        _git(work, "init", "-q")
+        (Path(work) / "a.txt").write_text("base\n")
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", "base")
+        base_sha = _git(work, "rev-parse", "HEAD")
+        (Path(work) / "b.txt").write_text("candidate\n")
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", "candidate on base")
+        cand_sha = _git(work, "rev-parse", "HEAD")
+        # The bare mirror the gateway owns; _git runs it from the work dir with
+        # the mirror as the positional (the dedicated subprocess helper the
+        # module's encoding ratchet is pinned against).
+        _git(work, "init", "-q", "--bare", mirror)
+        _git(
+            work,
+            "push",
+            "-q",
+            mirror,
+            "{}:{}".format(base_sha, self._BASE_REF),
+            "{}:{}".format(cand_sha, self._CAND_REF),
+        )
+        return work, mirror, base_sha, cand_sha
+
+    def _run_out_of_place(self, mirror, extra_args):
+        """Run the real guard out-of-place with ``GIT_DIR`` pinned to the mirror."""
+        return _run_push_guard(
+            mirror,
+            [
+                "--no-fetch",
+                "--base-ref",
+                self._BASE_REF,
+                "--candidate-ref",
+                self._CAND_REF,
+                *extra_args,
+            ],
+            env_extra={"GIT_DIR": mirror},
+        )
+
+    def test_a_candidate_one_commit_on_base_is_safe(self, tmp_path):
+        """The whole gateway path: SAFE against the mirror, not exit 2/40."""
+        _work, mirror, _b, _c = self._mirror(tmp_path)
+        rc, stdout, stderr = self._run_out_of_place(mirror, ["--max-ahead", "5"])
+        assert rc == 0, "expected SAFE, got {}: {}\n{}".format(rc, stdout, stderr)
+        assert "SAFE TO PUSH" in stdout
+
+    def test_single_on_base_is_safe_when_the_only_parent_is_base(self, tmp_path):
+        """``--require-single-on-base`` holds out-of-place: the candidate's only parent
+        is the base ref the gateway fetched."""
+        _work, mirror, _b, _c = self._mirror(tmp_path)
+        rc, stdout, stderr = self._run_out_of_place(mirror, ["--require-single-on-base"])
+        assert rc == 0, "expected SAFE, got {}: {}\n{}".format(rc, stdout, stderr)
+        assert "single commit on base" in stdout
+
+    def test_the_stale_base_check_still_refuses_out_of_place(self, tmp_path):
+        """The four checks still fire: a candidate NOT based on the fetched base ref is
+        refused (exit 40), so the fix did not turn the guard into a pass-through."""
+        work, mirror, base_sha, _c = self._mirror(tmp_path)
+        # Advance the base ref to a new commit the candidate does not descend from.
+        (Path(work) / "c.txt").write_text("newer base\n")
+        _git(work, "add", "-A")
+        _git(work, "commit", "-q", "-m", "base advances past the fork")
+        advanced = _git(work, "rev-parse", "HEAD")
+        _git(work, "push", "-q", "-f", mirror, "{}:{}".format(advanced, self._BASE_REF))
+        rc, stdout, stderr = self._run_out_of_place(mirror, ["--max-ahead", "5"])
+        assert rc == 40, "expected REFUSED (stale base), got {}: {}\n{}".format(rc, stdout, stderr)
+        assert "not based on the fresh" in stderr

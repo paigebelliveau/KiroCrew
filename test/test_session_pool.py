@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import subprocess
 import threading
@@ -382,6 +383,67 @@ class TestConfigWiring:
         """pool_size > 10 is clamped to 10."""
         mgr, _ = _make_manager(pool_size=100)
         assert mgr._pool_size == 10
+
+    @pytest.mark.asyncio
+    async def test_activation_drift_sweep_is_armed_pool_independently(self):
+        """``start_pool`` arms the drift sweep at ``pool_size=0`` so the pre-activation reap
+        runs even on the default install where ``_pool_health_loop`` never starts. The health
+        task stays None because the pool is disabled, proving the sweep does not ride the pool
+        loop.
+        """
+        from unittest.mock import AsyncMock
+
+        mgr, _ = _make_manager(pool_size=0)
+        mgr._ensure_background = AsyncMock()  # type: ignore[method-assign]
+        mgr._pool._stamp_privacy_headers_for_startup = AsyncMock()  # type: ignore[method-assign]
+        mgr._fill_warm_pool = AsyncMock()  # type: ignore[method-assign]
+        try:
+            await mgr._pool.start_pool(blocking=True)
+            assert mgr._pool._drift_sweep_task is not None, "drift sweep must arm at pool_size=0"
+            assert (
+                mgr._pool_health_task is None
+            ), "health loop must stay off when the pool is disabled"
+        finally:
+            task = mgr._pool._drift_sweep_task
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+
+    @pytest.mark.asyncio
+    async def test_drift_sweep_reaps_on_a_live_activation_after_a_disabled_boot(self):
+        """GPT 6.1 F2: a gateway that BOOTED with the gate OFF must still reap once an operator
+        activates LIVE. The loop is armed unconditionally and the reaper checks activation on
+        each tick, so an activation that flips on AFTER start_pool is observed.
+
+        Mutation check: arming the loop only when ``activation_enabled()`` was true at startup
+        (the earlier Item-8 shape) leaves ``_drift_sweep_task`` None here — booted disabled —
+        and the live-activation reap never happens; this asserts the task IS armed despite the
+        disabled boot.
+        """
+        from unittest.mock import AsyncMock
+
+        from kiro_crew.security import push_verdict as _pv
+
+        mgr, _ = _make_manager(pool_size=0)
+        mgr._ensure_background = AsyncMock()  # type: ignore[method-assign]
+        mgr._pool._stamp_privacy_headers_for_startup = AsyncMock()  # type: ignore[method-assign]
+        mgr._fill_warm_pool = AsyncMock()  # type: ignore[method-assign]
+        _orig = _pv.activation_enabled
+        _pv.activation_enabled = lambda: False  # type: ignore[assignment]  # booted DISABLED
+        try:
+            await mgr._pool.start_pool(blocking=True)
+            # Armed despite the disabled boot, so a later live activation is reaped per-tick.
+            assert (
+                mgr._pool._drift_sweep_task is not None
+            ), "drift sweep must arm even when the gate was OFF at boot (live activation)"
+        finally:
+            _pv.activation_enabled = _orig  # type: ignore[assignment]
+            task = mgr._pool._drift_sweep_task
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
 
 
 # ---------------------------------------------------------------------------
@@ -1125,6 +1187,87 @@ class TestPoolHealthLoop:
         healthy1.shutdown.assert_not_awaited()
         healthy2.shutdown.assert_not_awaited()
         mgr._schedule_replenish.assert_called_once()
+
+    # ── GPT c412: proactive push-verdict activation-drift reap ──
+    #
+    # A warm-pool provider is an approved, idle runtime issuing no tool calls and past no
+    # turn boundary, so the ACP per-call/per-turn drift guards never fire for it. When an
+    # operator activates gating AFTER it was spawned, it still holds credentials an activated
+    # install must withhold -- so the periodic sweep must retire it (and its process tree)
+    # before any claimant uses it.
+
+    @staticmethod
+    def _provider_spawned(pre_activation: bool | None):
+        p = _make_provider()
+        p.client = MagicMock()
+        p.client._spawn_push_verdict_activation = pre_activation
+        return p
+
+    @pytest.mark.asyncio
+    async def test_pre_activation_provider_retired_once_gating_is_active(self):
+        """Gating now ON + provider spawned pre-activation -> discarded by the sweep.
+
+        Mutation check: without the proactive reap the pre-activation provider survives the
+        sweep (it is alive and under TTL), so ``shutdown`` is never awaited and this fails.
+        """
+        mgr, _ = _make_manager(pool_agent="kirocrew")
+        mgr._pool._push_verdict_masks_ssh = staticmethod(lambda: True)
+        stale = self._provider_spawned(pre_activation=False)
+        fresh = self._provider_spawned(pre_activation=True)
+        mgr._warm_pool.put_nowait((stale, time.monotonic()))
+        mgr._warm_pool.put_nowait((fresh, time.monotonic()))
+        mgr._schedule_replenish = MagicMock()
+
+        await mgr._sweep_warm_pool_once()
+
+        stale.shutdown.assert_awaited_once()
+        fresh.shutdown.assert_not_awaited()
+        assert mgr._warm_pool.qsize() == 1
+
+    @pytest.mark.asyncio
+    async def test_pre_activation_provider_kept_when_gating_is_off(self):
+        """Gating OFF: a pre-activation provider is NOT reaped (no regression on the common case)."""
+        mgr, _ = _make_manager(pool_agent="kirocrew")
+        mgr._pool._push_verdict_masks_ssh = staticmethod(lambda: False)
+        stale = self._provider_spawned(pre_activation=False)
+        mgr._warm_pool.put_nowait((stale, time.monotonic()))
+        mgr._schedule_replenish = MagicMock()
+
+        await mgr._sweep_warm_pool_once()
+
+        stale.shutdown.assert_not_awaited()
+        assert mgr._warm_pool.qsize() == 1
+
+    @pytest.mark.asyncio
+    async def test_activated_spawn_provider_not_reaped_even_when_gating_is_active(self):
+        """A provider spawned UNDER activation (stamp True) is never a drift candidate."""
+        mgr, _ = _make_manager(pool_agent="kirocrew")
+        mgr._pool._push_verdict_masks_ssh = staticmethod(lambda: True)
+        fresh = self._provider_spawned(pre_activation=True)
+        mgr._warm_pool.put_nowait((fresh, time.monotonic()))
+        mgr._schedule_replenish = MagicMock()
+
+        await mgr._sweep_warm_pool_once()
+
+        fresh.shutdown.assert_not_awaited()
+        assert mgr._warm_pool.qsize() == 1
+
+    @pytest.mark.asyncio
+    async def test_unreadable_activation_fails_closed_and_reaps(self):
+        """An unreadable keystone fails CLOSED: the pre-activation provider is still retired."""
+        mgr, _ = _make_manager(pool_agent="kirocrew")
+
+        def _boom() -> bool:
+            raise RuntimeError("keystone unreadable")
+
+        mgr._pool._push_verdict_masks_ssh = staticmethod(_boom)
+        stale = self._provider_spawned(pre_activation=False)
+        mgr._warm_pool.put_nowait((stale, time.monotonic()))
+        mgr._schedule_replenish = MagicMock()
+
+        await mgr._sweep_warm_pool_once()
+
+        stale.shutdown.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------

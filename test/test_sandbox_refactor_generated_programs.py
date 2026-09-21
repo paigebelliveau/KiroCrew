@@ -125,6 +125,14 @@ def _pinned_host(root: Path, monkeypatch: pytest.MonkeyPatch) -> _Host:
     monkeypatch.setenv("HOME", str(pinned.home))
     for name in ("KIROCREW_POD", "KIROCREW_OS_HOME", "KIRO_HOME"):
         monkeypatch.delenv(name, raising=False)
+    # Pin the host-credential env the seatbelt socket deny and the launcher socket/bus masks
+    # read (SSH_AUTH_SOCK, XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS): a CI runner that has any
+    # of them set would otherwise leak its own ``/var/folders`` / ``/run/user`` socket path into
+    # the generated program and move the digest per host (the macOS vs Linux digest drift). An
+    # abstract DBUS address on a runner would also make the launcher refuse the activated spawn.
+    # Deleting them pins the "no forwarded socket, no session bus" shape the digests are taken in.
+    for name in ("SSH_AUTH_SOCK", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(sandbox, "config_dir", lambda: pinned.crew)
     monkeypatch.setattr(sandbox, "kiro_agents_dir", lambda: pinned.home / ".kiro" / "agents")
     monkeypatch.setattr(sandbox, "carveout_chain_has_planted_link", lambda _path: False)
@@ -315,28 +323,28 @@ _PROFILE_CASES: dict[str, tuple[str, _Setup | None, _Kwargs | None]] = {
 }
 
 _LAUNCHER_DIGESTS: dict[str, str] = {
-    "cc": "ad820084c5c73c0e735b0e27badc1434fd28d4cba448216bc6cac076bd19698d",
-    "cc-carveout": "741bce3ff3d1e0ce84841baa83de779c019cd6190011ac9192250168fb9247ee",
-    "cc-expose": "bf165b8aa47b59b7e0b083b4fbec95df0279dd275ac15b12a653562f5902fcb0",
-    "cc-private-windows": "eaddc7441a2516b17f348a916953e3846265e44fc584dd7894de3954f895656d",
-    "cc-python-env-ssh-sock": "440427fb4575ed8e2d10be9bdcfc9462e8b971f466eb1ef7ca5efe7242add20f",
-    "standard": "9c218ed46e239ffd4eebe714c5312ba2e5aa616ec19201182bd0a1f71dabe598",
-    "standard-carveout": "78ef1494036c192779a330682589fe2e89f288fffef7e8466d2a774b41063c24",
-    "standard-default-home": "23626781f2c57d57c251494ffd596792e66a81245b7012f4f1073476233edd13",
-    "standard-hidden-and-visible": "e8d65f63d1a30372c303fe858305e6a34581b7d376b474ee1438ecd621e71784",
-    "standard-notebook-chain": "2d1359c766fc49bebe1a4989221c1bdb5732f7042a51e6d1524ed37bbb11c7bf",
-    "standard-pod": "59b2293ebf7f283b40ea30d9b6dda9f1fb7cc7ce8f99627ec9ae73ea3bab4662",
-    "standard-refused-carveouts": "9c218ed46e239ffd4eebe714c5312ba2e5aa616ec19201182bd0a1f71dabe598",
-    "strict": "d1a991531bade0f3009803f354766dd7436430f03c0703343b812adc02c07236",
-    "strict-carveout": "d54ada584c77f30018acc35a5c57e8248d9078977eda51712d0952657fef4f0c",
-    "strict-crew-home-alias": "d6ce95653fb0870ea6e3d21ab38f3fdaeb335d0e71f79ae5fcdd59a227a239ed",
-    "strict-default-home": "ffd511075b28f46a7b2496b63cf169ed57f04eb8e5d7bbc70354d767baaf062e",
-    "strict-expose": "a2463c4904d7b587addffb8902d05592a40b30f3435a650bab68b91e87e0efb4",
-    "strict-identities": "cf1d238c4bab8766c2dba7aa9e8376c9f735a51f376646abff27deaa3f4e71a1",
-    "strict-no-accept-new": "88dd2e9e042a10f070c47c5fd033055097d60166c16cede8bd4d360d3fcdfaae",
-    "strict-pod": "72b906261b2310bb09424c773336a8252d69aeaa4cd669948fb6356a4e1c9a56",
-    "strict-python-env-ssh-sock": "de27c546b7cc2ac5dc5ee646c26b8d8753a92b2ec77f3e4513e22ba85494b179",
-    "strict-symlinked-home": "6f199ed95ce7c00e9a21b4fdf0a0d4da050a413d07da063efb09182252684bb1",
+    "cc": "17e11689f6da0f42efb1e53957469abd94daf7c47751770fa530e76f42c914c0",
+    "cc-carveout": "4c3e08c66c458b1c8910b4f17828f4a504e3b4754b0f763b389c4763ba06af04",
+    "cc-expose": "234720a251e049ae52981e670863962f12b5a1f983a0f6446a4bed9969f0daa3",
+    "cc-private-windows": "6c4992e4b85dad9f145b907dcd8711d0a92081125a9848fd227732bb66b35a1d",
+    "cc-python-env-ssh-sock": "89a9c3bf05d63444c9e867bf4a0662fe13c6fe8c0006cf761b01af78c8a39839",
+    "standard": "17700a1ab36e2421987f36519c9645f9ee95a9df12f04bbe7ef206bccbb5d24b",
+    "standard-carveout": "74316a36613a43eaa3e20f2fa0053dc67c24d8c6775d707372f84ea4e9a5f912",
+    "standard-default-home": "d224c0e441bd0d2de920f969e5d85927e631feee9e4b76e4925353859a7e83a5",
+    "standard-hidden-and-visible": "0f69709fe692021596548a9acd5417801185ba11ae264371f4665877dc4caf82",
+    "standard-notebook-chain": "4828f26c12e18f897562971d7dc99c4c9f08172965434aaa88182065bfb37ea0",
+    "standard-pod": "88423f6c10bf041e527d89b81f2bf992a46615f20f2e1342ae33e664b1fd762b",
+    "standard-refused-carveouts": "17700a1ab36e2421987f36519c9645f9ee95a9df12f04bbe7ef206bccbb5d24b",
+    "strict": "1af958d0c499d2918348d1da6297d6a8afd67989a7754e4b5d8cf0ef337b8f65",
+    "strict-carveout": "6e28c4294ed87f6e73217809c2058892bb6cc1e5776549dd6d00d69332aab9ee",
+    "strict-crew-home-alias": "1a44785f28f5dbbb179e58ed4824e00cfce23a8a79cdb9a4ba44485de2c70deb",
+    "strict-default-home": "30b0c921c4e5b589c22fcbc6b995ef0785012811f16f80f03b1076291a97b113",
+    "strict-expose": "85bb90bac035a3a42af6ec1474ad1fbd2a78d393b4fa0ecba59fbf97cd337d44",
+    "strict-identities": "553f1fc68c6757842c78dc4db8986b953d9232abd49fd52a0d9d1de4b651dd71",
+    "strict-no-accept-new": "7912baff36859e549bed84e519166e965ac767e79b19c69195caba517b3333fc",
+    "strict-pod": "b871b716fe0ff65de33117f0c80fc29d41173b7a98895b5d8755d46d9cb2fc8e",
+    "strict-python-env-ssh-sock": "20c8a533f2bc4f4f057d42fc8c90de4152ef7ffde85908de55c042f78fef445b",
+    "strict-symlinked-home": "ff31bbb829a07f16543d66533a444d633b801ac7d8297bf9536d0ef954c54b83",
 }
 
 _PROFILE_DIGESTS: dict[str, str] = {

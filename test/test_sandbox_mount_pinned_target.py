@@ -1704,7 +1704,10 @@ _BREAK_ARMS = (
     (
         "file-mask-by-name",
         "            _file_fd, _file_target = _pin_mount_path(\n"
-        "                f.encode(), stat.S_ISREG, require_present=_mask_required(f))\n"
+        "                f.encode(),\n"
+        "                lambda m: stat.S_ISREG(m) or stat.S_ISSOCK(m),\n"
+        "                require_present=_mask_required(f),\n"
+        "            )\n"
         "            if _file_target is None:\n"
         "                continue\n",
         "            _file_fd, _file_target = None, f.encode()\n"

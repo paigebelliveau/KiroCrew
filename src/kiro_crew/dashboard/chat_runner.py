@@ -545,6 +545,7 @@ from kiro_crew.security import (
     redact_credentials,
     redact_exfiltration_urls,
     redact_exfiltration_urls_with_records,
+    resolve_push_verdict_activation_for_command,
     sanitized_oauth_endpoint,
 )
 from kiro_crew.security.credential_sources import credential_records
@@ -12638,17 +12639,31 @@ async def _run_chat(
                     # so the security gate evaluates what actually executes.
                     # event.title may be an LLM-authored description that hides
                     # a dangerous command (see HookManager.on_tool_call).
-                    tool_result = state.context_builder.hooks.on_tool_call(
+                    #
+                    # Resolve the push-verdict activation keystone off the loop ONLY for a
+                    # git-publish command. ``is_denied`` consults the keystone only in its
+                    # publish branch, so a non-publish tool call needs no read at all -- the
+                    # helper does a cheap verb-anchored check first and reads nothing (and runs
+                    # no worker thread) unless the command invokes ``git push``. That keeps a
+                    # never-publishing install exactly as it was while still keeping the publish
+                    # read off the gateway loop.
+                    _resolved_agent = read_effective_agent(client)
+                    _hooks = state.context_builder.hooks
+                    _pv_activation = await resolve_push_verdict_activation_for_command(
+                        event.shell_command, event.title
+                    )
+                    tool_result = _hooks.on_tool_call(
                         event.title,
                         session_key=session_key,
                         agent=slot.agent or "",
                         app=slot._app or "",
+                        push_verdict_activation=_pv_activation,
                         **hook_gate_kwargs(event),
                         # The RESOLVED agent (what actually served the turn), not
                         # slot.agent — that is an alias resolve_agent_bindings
                         # maps to a concrete kiro agent, so it must never decide
                         # which builtin app an agent belongs to.
-                        resolved_agent=read_effective_agent(client),
+                        resolved_agent=_resolved_agent,
                     )
                     if tool_result.action == TOOL_DENY:
                         # Surface WHY: carry the deny reason into the pill so

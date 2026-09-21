@@ -31,11 +31,15 @@ def _sessions_with(provider: MagicMock) -> MagicMock:
     return sessions
 
 
-def _provider_requesting_tool() -> MagicMock:
+def _provider_requesting_tool(title: str = "execute_bash") -> MagicMock:
     provider = MagicMock()
 
     async def _stream(message: str):
-        yield LLMEvent(kind="permission_request", title="execute_bash", request_id="r1")
+        yield LLMEvent(
+            kind="permission_request",
+            title=title,
+            request_id="r1",
+        )
         yield LLMEvent(kind="text_chunk", text='{"steps": []}')
         yield LLMEvent(kind="complete")
 
@@ -86,3 +90,37 @@ def test_no_ctx_denies_by_default():
 
     provider.reject_tool.assert_awaited_once_with("r1")
     provider.approve_tool.assert_not_awaited()
+
+
+def test_decompose_resolves_activation_off_loop_and_passes_it_in():
+    """The decomposition gate resolves push-verdict activation OFF the event loop and passes it
+    into on_tool_call -- but ONLY for a git-publish command (First Principles "undeclared cost").
+
+    A non-publish tool call passes ``None`` and reads no keystone; a git-publish command passes a
+    resolved ``PushVerdictActivation`` (resolved off the loop via
+    ``resolve_push_verdict_activation_for_command``), which is what keeps the inline keystone read
+    in ``security.is_denied`` off the event loop for the one case that needs it.
+    """
+    from kiro_crew.security import PushVerdictActivation
+
+    # Non-publish request: the gate must pass None (no keystone read at all).
+    provider = _provider_requesting_tool()
+    sessions = _sessions_with(provider)
+    ctx = _ctx_with_hook(TOOL_ALLOW)
+
+    asyncio.run(decompose("spec", sessions, ctx=ctx, task_id="t1"))
+
+    ctx.hooks.on_tool_call.assert_called_once()
+    passed = ctx.hooks.on_tool_call.call_args.kwargs.get("push_verdict_activation")
+    assert passed is None, "a non-publish decomposition tool call must not resolve the keystone"
+
+    # git-publish request: the gate resolves activation off-loop and passes the object in.
+    pub_provider = _provider_requesting_tool(title="git push origin feature-x")
+    pub_sessions = _sessions_with(pub_provider)
+    pub_ctx = _ctx_with_hook(TOOL_ALLOW)
+
+    asyncio.run(decompose("spec", pub_sessions, ctx=pub_ctx, task_id="t1"))
+
+    pub_ctx.hooks.on_tool_call.assert_called_once()
+    pub_passed = pub_ctx.hooks.on_tool_call.call_args.kwargs.get("push_verdict_activation")
+    assert isinstance(pub_passed, PushVerdictActivation)

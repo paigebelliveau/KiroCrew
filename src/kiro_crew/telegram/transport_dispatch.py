@@ -1163,11 +1163,22 @@ class TelegramDispatcher:
             # PreToolUse security gate (channel-neutral, off ctx_builder.hooks):
             # sensitive-path keystone + governance ceiling + deny-list. Returns
             # "deny" (un-overridable), "auto_approve", or "" (passthrough).
+            # The ``_tool_gate`` is SYNCHRONOUS and runs on the event loop, so resolve activation
+            # ONCE here (off the loop) and pass it in: a ``git push`` command reaching
+            # ``is_denied`` never triggers the inline on-loop keystone read
+            # (no-blocking-call-on-event-loop). Imported LOCALLY: this module is a strict
+            # re-export facade whose composition contract forbids a module-level name here
+            # (``test_telegram_transport_dispatch_composition_contract``).
+            from kiro_crew.security import resolve_push_verdict_activation
+
+            _pv_activation = await asyncio.to_thread(resolve_push_verdict_activation)
+
             def _tool_gate(event: Any) -> str:
                 result = self.ctx_builder.hooks.on_tool_call(
                     getattr(event, "title", "") or "",
                     session_key=session_key,
                     agent=agent,
+                    push_verdict_activation=_pv_activation,
                     **hook_gate_kwargs(event),
                 )
                 if result.action == TOOL_DENY:

@@ -65,6 +65,7 @@ from kiro_crew.security import (
     is_unverifiable_path_refusal,
     redact_credentials,
     redact_exfiltration_urls,
+    resolve_push_verdict_activation_for_command,
     sensitive_path_refusal,
 )
 from kiro_crew.sel import sel as _sel
@@ -2917,7 +2918,7 @@ async def _resolve_permission(
     # No HookManager (rare) → None → fail-closed default (all built-ins).
     _denied_regexes = hooks.effective_denied_regexes() if hooks is not None else None
 
-    def _regex_deny_mechanism(probe: str, unconditional: str) -> str:
+    def _regex_deny_mechanism(probe: str, unconditional: str, activation: Any = None) -> str:
         """Classify an already-decided regex-tier deny by its provenance.
 
         A governance pin re-adds a built-in rule the user disabled, so the SAME
@@ -2929,7 +2930,10 @@ async def _resolve_permission(
 
         Re-runs the match against the pin-free set — deny path only, so the
         common allow path pays nothing — and reports a match that survives ONLY
-        with pins as policy state.
+        with pins as policy state. ``activation`` is the off-loop-resolved
+        push-verdict reading (``None`` for a non-publish probe), passed through
+        to ``is_denied`` so this recheck NEVER rereads the activation keystone on
+        the event loop (no-blocking-call-on-event-loop).
         """
         if hooks is None:
             return unconditional
@@ -2942,7 +2946,9 @@ async def _resolve_permission(
             # restores the runaway this gate exists to catch.
             logger.debug("deny provenance unresolved; reporting unconditional", exc_info=True)
             return unconditional
-        return unconditional if is_denied(probe, denied_regexes=_unpinned) else "policy_deny"
+        if is_denied(probe, denied_regexes=_unpinned, activation=activation):
+            return unconditional
+        return "policy_deny"
 
     # Defense-in-depth: the title AND every string in event.tool_input go through
     # the same three predicates. The title usually carries the full path/command
@@ -3107,11 +3113,24 @@ async def _resolve_permission(
     _hit = await asyncio.to_thread(_scan_off_loop)
     if _hit is not None:
         _kind, _reason, _matched, _tier = _hit
+        # Resolve activation OFF the loop before the provenance reclassification: for a regex-tier
+        # deny on a git-publish probe, ``_regex_deny_mechanism`` re-runs ``is_denied``, which would
+        # otherwise reread the activation keystone inline on the loop (no-blocking-call-on-event-
+        # loop). Publish-gated, so a non-publish deny resolves to None and reads nothing.
+        _deny_activation = (
+            await resolve_push_verdict_activation_for_command(_matched, event.title or "")
+            if _kind == "regex"
+            else None
+        )
         _log(
             "denied",
             error=_reason,
             metadata={
-                "mechanism": (_regex_deny_mechanism(_matched, _tier) if _kind == "regex" else _tier)
+                "mechanism": (
+                    _regex_deny_mechanism(_matched, _tier, _deny_activation)
+                    if _kind == "regex"
+                    else _tier
+                )
             },
         )
         await _steer_host_deny(provider, event, _reason, cause=DENY_CAUSE_POLICY)

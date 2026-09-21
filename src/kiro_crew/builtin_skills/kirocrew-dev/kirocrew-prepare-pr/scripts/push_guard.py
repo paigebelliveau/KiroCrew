@@ -168,6 +168,17 @@ _RELOCATION_VARS = frozenset(
         "GIT_WORK_TREE",
     }
 )
+# Set by --base-ref/--candidate-ref/--no-fetch (see _parse_args): the caller
+# (the gateway) runs the guard against a repository IT owns and pointed the
+# guard at with GIT_DIR, so in that out-of-place mode the guard must NOT strip
+# GIT_DIR/GIT_WORK_TREE from its git children -- stripping them (as the
+# in-place guard correctly does, meaning the repo of its own working dir) sent
+# every child to the gateway's cwd, where it exits "not a git repository" and
+# the gateway could never issue a verdict.
+_OUT_OF_PLACE = False
+# The relocation vars a gateway caller legitimately sets to name its own repo;
+# kept (not stripped) only in out-of-place mode.
+_OUT_OF_PLACE_KEEP = frozenset({"GIT_DIR", "GIT_WORK_TREE"})
 # Set on every child: history as committed.  No replace ref, and no legacy
 # info/grafts file, can re-parent a commit.  The graft file named instead is a
 # path that cannot exist (a name under a device file): git then reads no graft
@@ -227,8 +238,14 @@ def child_env(probe=True, extra=None):
 
     os.environ without _RELOCATION_VARS, plus _SAFETY_ENV, plus NO_PROMPT_ENV
     for a ``probe`` child (anything that does not run user hooks or signing).
+
+    In out-of-place mode (``--base-ref``/``--candidate-ref``/``--no-fetch``) the
+    caller named its own repository through ``GIT_DIR``/``GIT_WORK_TREE``, so
+    those two are KEPT rather than stripped -- otherwise every git child would
+    run in the caller's cwd instead of the repository the guard was pointed at.
     """
-    env = {k: v for k, v in os.environ.items() if k not in _RELOCATION_VARS}
+    strip = _RELOCATION_VARS - _OUT_OF_PLACE_KEEP if _OUT_OF_PLACE else _RELOCATION_VARS
+    env = {k: v for k, v in os.environ.items() if k not in strip}
     env.update(_SAFETY_ENV)
     if probe:
         env.update(NO_PROMPT_ENV)
@@ -472,11 +489,33 @@ def _ask(args, answers=(0,), env=None, raw=False, input=None):
     raise Refused()
 
 
+#: Set by ``--base-ref`` / ``--candidate-ref``.  Empty means the in-place
+#: spellings: the base is the fetched ``refs/remotes/origin/<base>`` and the
+#: candidate is ``HEAD``.  The gateway names them instead, because it fetches
+#: both into a repository it owns and judges them THERE, leaving the agent's
+#: worktree read-only -- a fetch into that worktree would both write to the
+#: tree being judged and fail outright when the tree is mounted read-only.
+#: The override reaches only the read-only guard reads (the base ref, and the
+#: candidate in ``_check_single_on_base`` / ``_check_pre_squash``); the commit
+#: builder (``--commit`` / ``--amend`` / ``--squash``) always means the real
+#: ``HEAD`` of the real checkout, which is why combining an override with one
+#: of those modes is refused as a usage error (see ``_parse_args``).
+_BASE_REF = ""
+_CAND_REF = ""
+
+
+def _cand():
+    """The ref holding the commit being judged (``HEAD``, or ``--candidate-ref``)."""
+    return _CAND_REF or "HEAD"
+
+
 def _remote_ref(base):
-    """The ref the fetch writes.  The short ``origin/<base>`` resolves a stray
-    local branch or tag of that name first (git warns, but the guard never
-    sees the warning)."""
-    return "refs/remotes/origin/" + base
+    """The ref the fetch writes, or ``--base-ref`` when the gateway named one.
+
+    The short ``origin/<base>`` resolves a stray local branch or tag of that
+    name first (git warns, but the guard never sees the warning); the ``+``
+    concatenation keeps the fallback from matching a sweep over this file."""
+    return _BASE_REF or ("refs/remotes/origin/" + base)
 
 
 def parse_origin_head(full):
@@ -1004,7 +1043,7 @@ def _refuse_unrecorded(paths, what, git_dir, base, mode, max_ahead=DEFAULT_MAX_A
 def _check_single_on_base(base, git_dir, vouched=()):
     """Post-squash guard: HEAD's ONLY parent is origin/<base>, and the record covers HEAD."""
     pinned = _sha(_remote_ref(base))
-    head = _sha("HEAD")
+    head = _sha(_cand())
     tree, parents, _ = _commit_info(head)
     shown = " ".join(p[:12] for p in parents) or "none"
 
@@ -1021,11 +1060,15 @@ def _check_single_on_base(base, git_dir, vouched=()):
             "  To fix: {}.".format(shown, base, pinned[:12], _resquash_remedy(base))
         )
         raise Refused()
-    unknown = _unrecorded(
-        git_dir, _head_ref(), _changed(pinned, tree), [head], pinned, head, vouched
-    )
-    if unknown:
-        _refuse_unrecorded(unknown, "HEAD ({})".format(head[:12]), git_dir, base, "single")
+    # Build-record vouching does not apply out-of-place (no branch reflog or
+    # agent-staged worktree in the gateway's bare mirror); the parents-are-base
+    # check above is the single-on-base contract there.
+    if not _OUT_OF_PLACE:
+        unknown = _unrecorded(
+            git_dir, _head_ref(), _changed(pinned, tree), [head], pinned, head, vouched
+        )
+        if unknown:
+            _refuse_unrecorded(unknown, "HEAD ({})".format(head[:12]), git_dir, base, "single")
 
 
 def _patch_ids(revs):
@@ -1052,7 +1095,7 @@ def _check_pre_squash(base, max_ahead):
     command SUCCEEDED.
     """
     pinned = _sha(_remote_ref(base))
-    head = _sha("HEAD")
+    head = _sha(_cand())
     rc, merge_base = _ask(["git", "merge-base", head, pinned], answers=(0, 1))
     if rc != 0 or not merge_base:
         err(
@@ -2021,6 +2064,27 @@ def _parse_args(argv=None):
             DEFAULT_MAX_AHEAD
         ),
     )
+    parser.add_argument(
+        "--base-ref",
+        default="",
+        metavar="REF",
+        help="Ref holding the base to judge against, instead of the fetched "
+        "refs/remotes/origin/<base>. For a caller (the gateway) that fetched the "
+        "base into a repository it owns and names it here. Read-only guard modes only.",
+    )
+    parser.add_argument(
+        "--candidate-ref",
+        default="",
+        metavar="REF",
+        help="Ref holding the commit to judge, instead of HEAD. Read-only guard "
+        "modes only; the commit builder always means the real HEAD.",
+    )
+    parser.add_argument(
+        "--no-fetch",
+        action="store_true",
+        help="Do not fetch origin/<base> first. For a caller that already fetched "
+        "the refs named by --base-ref/--candidate-ref into a repository it owns.",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--require-single-on-base",
@@ -2089,6 +2153,19 @@ def _parse_args(argv=None):
                 "--squash" if args.squash == "-" else "-F"
             )
         )
+    # The ref overrides reach only the read-only guard reads; the commit builder
+    # always means the real HEAD of the real checkout, so an override combined
+    # with a write mode is a usage error, not a silently ignored flag.
+    out_of_place = bool(args.base_ref or args.candidate_ref or args.no_fetch)
+    if out_of_place and (args.squash is not None or args.commit or args.amend):
+        parser.error(
+            "--base-ref/--candidate-ref/--no-fetch are read-only; they cannot be "
+            "combined with --squash/--commit/--amend, which build on the real HEAD"
+        )
+    global _BASE_REF, _CAND_REF, _OUT_OF_PLACE
+    _BASE_REF = args.base_ref
+    _CAND_REF = args.candidate_ref
+    _OUT_OF_PLACE = out_of_place
     return args
 
 
@@ -2119,10 +2196,13 @@ def _main(args):
 
     # Cheap local preconditions before the fetch and the history scan.  The
     # index check comes first: mid-operation, HEAD is detached, and that is
-    # the operation's state, not a branch to check out.
-    rc = _check_index(git_dir)
-    if rc:
-        return rc
+    # the operation's state, not a branch to check out.  Out-of-place
+    # (the gateway judging refs in a bare mirror it owns) has no working-tree
+    # index to validate, so this precondition does not apply there.
+    if not _OUT_OF_PLACE:
+        rc = _check_index(git_dir)
+        if rc:
+            return rc
     ref = message = message_path = None
     vouched = _named_paths(args.paths, os.path.realpath(_top())) if args.paths else {}
     if args.squash is not None:
@@ -2140,7 +2220,8 @@ def _main(args):
             "rewrite it. Check out your feature branch.".format(base)
         )
         return EXIT_REFUSED
-    _fetch_base(base)
+    if not args.no_fetch:
+        _fetch_base(base)
 
     if args.require_single_on_base:
         _check_single_on_base(base, git_dir, vouched)
@@ -2148,11 +2229,18 @@ def _main(args):
         return 0
     head, pinned, ahead = _check_pre_squash(base, args.max_ahead)
     if args.squash is None:
-        unknown = _unrecorded(
-            git_dir, _head_ref(), _changed(pinned, head), ahead, pinned, head, vouched
-        )
-        if unknown:
-            _refuse_unrecorded(unknown, "HEAD", git_dir, base, "check", args.max_ahead)
+        # The build-record vouching reads the branch's reflog and the worktree's
+        # changed paths to prove this script committed them.  Out-of-place (the
+        # gateway judging a fetched candidate ref in a bare mirror it owns) has
+        # neither a branch reflog nor agent-staged worktree content, and the
+        # gateway itself performs the push -- so the stale-base/ancestry/ahead/
+        # replay checks ARE the contract there; the vouching does not apply.
+        if not _OUT_OF_PLACE:
+            unknown = _unrecorded(
+                git_dir, _head_ref(), _changed(pinned, head), ahead, pinned, head, vouched
+            )
+            if unknown:
+                _refuse_unrecorded(unknown, "HEAD", git_dir, base, "check", args.max_ahead)
         print("STATUS: SAFE TO PUSH")
         return 0
     _squash(base, ref, head, pinned, ahead, git_dir, message, vouched)

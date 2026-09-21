@@ -197,6 +197,7 @@ from kiro_crew.sandbox import (
     RLIMIT_PROFILE_SESSION_HOST,
     BoundWorkspaceMismatch,
     _forward_ssh_auth_sock,
+    _push_verdict_masks_ssh,
     agents_slice_throttling,
     assert_voice_runtime_outside_agent_workspace,
     bind_voice_safe_agent_workspace_async,
@@ -1125,6 +1126,18 @@ class AcpRuntime:
         # that mirrors no other spec.
         self._derived_spec_snapshot: Any = None
 
+        # The push-verdict activation state this runtime's LIVE process was built
+        # under, sampled at spawn from the same off-loop read the sandbox mask uses.
+        # ``None`` before the first spawn. The credential mask is baked into the
+        # sandbox wrap at spawn and is fixed for the child's lifetime, so a runtime
+        # spawned while activation was OFF keeps full git credentials even after an
+        # operator turns activation ON -- and activation is a manual keystone write
+        # with no watcher to re-sandbox live children. ``_is_stale`` compares this
+        # snapshot to the current activation signal and recycles the process when it
+        # has drifted ON, so the respawn (existing machinery) rebuilds the child
+        # under the mask before it can publish an unjudged commit.
+        self._spawn_push_verdict_activation: bool | None = None
+
         # Recycling thresholds — see _is_stale(). Long-lived multiplexed
         # runtimes (e.g. the kirocrew-lite background runtime) have no
         # per-turn compaction, so age/RSS are the only signals available to
@@ -1368,6 +1381,12 @@ class AcpRuntime:
         # Both are cleared when the owning session unregisters.
         self._subagent_sessions: set[str] = set()
         self._subagent_owner: str | None = None
+        # The lease-holding session provider (set by ``AcpSessionProvider.acquire_runtime_lease``
+        # when this runtime becomes a registered session's leased process; cleared on release).
+        # The pre-activation drift sweep uses it to retire this runtime cooperatively -- release
+        # the lease through its owner so the kill is authorized -- instead of attempting a kill
+        # the ownership gate refuses while the lease is outstanding (GPT 6.1 finding).
+        self._lease_holder_provider: object | None = None
         # How many ids the LAST roster named past NATIVE_CHILD_ROSTER_CAP.
         # Non-zero means an announced child may be unrecognisable here, so a
         # permission request for an unknown session is audited under
@@ -1394,6 +1413,84 @@ class AcpRuntime:
         # believe a consumer exists and park a child request unread.
         self._turn_active_sessions: set[str] = set()
         self._dropped_frames_flushed_at: float = 0.0
+
+        # Register this live shared runtime in the same registry ``AcpClient`` uses, so the
+        # periodic pool-health sweep reaps it too if an operator activates push-verdict gating
+        # after it was spawned -- the default kiro session (and the one behind
+        # ``AcpSessionProvider._runtime``) runs on an ``AcpRuntime``, not an ``AcpClient``, and
+        # would otherwise escape the between-turns sweep. WeakSet: no deregistration needed.
+        # Imported here (not at module scope): ``AcpClient`` the CLASS is not among the names
+        # this module imports from ``acp.client`` above, and a module-scope add would also run
+        # before the class is fully built on some import orders.
+        from kiro_crew.acp.client import AcpClient as _AcpClient
+
+        _AcpClient._LIVE_RUNTIMES.add(self)
+
+    def _is_live_pre_activation(self) -> bool:
+        """True when this runtime was spawned non-activated and its process is still alive.
+
+        The sweep's uniform candidate predicate (see ``AcpClient.sweep_pre_activation_runtimes``).
+        Only a non-activated spawn can drift ON (deactivation only relaxes).
+        """
+        return (
+            self._spawn_push_verdict_activation is False
+            and self._process is not None
+            and self._process.returncode is None
+        )
+
+    async def _reap_pre_activation_drift(self) -> bool:
+        """Retire THIS runtime's pre-activation process tree (the sweep's uniform reap hook).
+
+        A registered shared runtime holds an outstanding lease, and a bare ``kill`` is REFUSED by
+        ``authorize_runtime_kill`` while that lease is held -- so the credentialed process would
+        survive the sweep. The fix (GPT 6.1) is to retire COOPERATIVELY: release the lease through
+        the owning session provider FIRST, which drops the ownership entry, and only then kill, so
+        the kill is authorized and the tree actually dies. ``expected=True`` marks it an
+        intentional recycle, not a crash; the next ``ensure_ready`` respawns the child under the
+        credential mask.
+
+        Returns True only when retirement is CONFIRMED (the process is dead). If the lease could
+        not be released (a shape with no holder back-reference) the kill may still be refused and
+        the process survive -- we re-check liveness and return False so the sweep does not count a
+        survivor as handled; it is then recycled at its owning session's next turn boundary, and
+        the per-tool-call drift refusal already blocks any publish from it in the meantime.
+        """
+        logger.warning(
+            "push-verdict: periodic sweep found a LIVE shared runtime (pid=%s) spawned BEFORE "
+            "gating was activated -- its credential mask is fixed at spawn, so it still holds "
+            "git credentials this install must withhold. Retiring it and its process tree so "
+            "the next turn respawns under the mask",
+            self._pid,  # pid-owner-ok: the sweep is the pool's reaper ending this runtime
+        )
+        # Release the lease through the owning provider BEFORE the kill, so the ownership gate
+        # authorizes the teardown rather than refusing it. Best-effort and duck-typed: a provider
+        # holding no lease makes this a no-op, and a runtime shape without the back-reference
+        # falls through to the bare kill below.
+        _holder = self._lease_holder_provider
+        if _holder is not None:
+            _release = getattr(_holder, "release_runtime_lease", None)
+            if _release is not None:
+                try:
+                    await _release()
+                except Exception:
+                    logger.warning(
+                        "push-verdict: cooperative lease release failed for pre-activation "
+                        "runtime (pid=%s); falling back to a direct kill",
+                        self._pid,  # pid-owner-ok: the sweep is the pool's reaper
+                        exc_info=True,
+                    )
+        await self.kill(expected=True, reason="push_verdict_activation")
+        if self._is_live_pre_activation():
+            logger.warning(
+                "push-verdict: sweep could not retire live pre-activation runtime (pid=%s) -- "
+                "its lease could not be released (no owning-provider back-reference), so the "
+                "kill was refused and the credentialed process survives. Its owning session "
+                "recycles it at its next turn boundary / tool-call gate, which also refuses any "
+                "publish from it; the sweep does not count it reaped",
+                self._pid,  # pid-owner-ok: the sweep is the pool's reaper ending this runtime
+            )
+            return False
+        return True
 
     @property
     def pid(self) -> int | None:
@@ -1570,7 +1667,7 @@ class AcpRuntime:
         return (time.monotonic() - self._spawn_monotonic) > self._max_age_secs
 
     async def _is_stale(self) -> str | None:
-        """Return the recycle reason ('age' or 'rss'), or None if not stale.
+        """Return the recycle reason ('age', 'rss', or 'push_verdict_activation'), or None.
 
         Distinct from is_alive(): a runtime can be perfectly healthy (process
         running, protocol responsive) yet still be "stale" — e.g. the
@@ -1599,6 +1696,19 @@ class AcpRuntime:
         """
         if self._pid is None:
             return None
+
+        # Push-verdict activation drift: a live process built while gating was OFF
+        # kept full git credentials, and its sandbox mask is fixed for its lifetime.
+        # If an operator has since activated gating, an opaque subprocess of this
+        # still-running child could publish an unjudged commit -- so recycle it, and
+        # the respawn rebuilds the child under the credential mask. Cheap boolean
+        # read, resolved off-loop (activation keystone stat/read), only when this
+        # runtime was spawned under a NON-activated install; once spawned activated,
+        # there is no OFF-drift to catch (deactivation only relaxes) so we skip it.
+        if self._spawn_push_verdict_activation is False:
+            now_activated = await asyncio.to_thread(_push_verdict_masks_ssh)
+            if now_activated:
+                return "push_verdict_activation"
 
         if self._spawn_monotonic is not None:
             age = time.monotonic() - self._spawn_monotonic
@@ -2115,6 +2225,16 @@ class AcpRuntime:
         # (config read) and pass it to both the sandbox wrap and the parent scrub
         # below, so neither reads config on the loop. Scoped to this agent spawn.
         forward_ssh_auth_sock = await asyncio.to_thread(_forward_ssh_auth_sock)
+        # Resolve the push-verdict activation mask off-loop too (activation
+        # keystone read) and thread it into the parent scrub below, so the
+        # on-loop enforcement point does no synchronous config read. Agent spawn,
+        # never gateway_publish, so the mask is the raw activation signal; under
+        # it the HTTPS token env is withheld from the Windows-delegated child.
+        push_verdict_activation = await asyncio.to_thread(_push_verdict_masks_ssh)
+        # Record the activation state this process is being built under, so
+        # ``_is_stale`` can recycle it if an operator activates gating later while
+        # this child is still live (its baked-in mask would otherwise never update).
+        self._spawn_push_verdict_activation = push_verdict_activation
         argv, self._sandbox_cleanup = await wrap_argv_async(
             argv,
             mode=self._sandbox_mode,
@@ -2203,7 +2323,11 @@ class AcpRuntime:
         # CLI's internal sandbox without a POSIX `env -u` wrapper. Do it after
         # credential-pointer/API-key resolution so no resolver can reintroduce a
         # denied variable; KIRO_API_KEY itself is intentionally not denied.
-        env = scrub_agent_subprocess_env(env, forward_ssh_auth_sock=forward_ssh_auth_sock)
+        env = scrub_agent_subprocess_env(
+            env,
+            forward_ssh_auth_sock=forward_ssh_auth_sock,
+            push_verdict_activation=push_verdict_activation,
+        )
         # Bundled skill scripts must not depend on a system ``python`` name.
         # The desktop bundles carry their interpreter outside the user's PATH,
         # while this path is already running under the exact environment that

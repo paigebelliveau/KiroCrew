@@ -135,6 +135,7 @@ from kiro_crew.security import (
     redact_credentials,
     redact_exfiltration_urls,
     redact_local_paths,
+    resolve_push_verdict_activation,
 )
 from kiro_crew.sel import sel
 from kiro_crew.session import SessionBusyError
@@ -1178,11 +1179,19 @@ class DiscordDispatcher:
             )
 
             # PreToolUse security gate (channel-neutral, off ctx_builder.hooks).
+            # The ``_tool_gate`` the ACP dispatcher calls back is SYNCHRONOUS and runs on the
+            # event loop, so it cannot resolve activation off-loop per call. Resolve it ONCE here
+            # (off the loop) and pass it in, so a ``git push`` command reaching ``is_denied`` in
+            # this channel path never triggers the inline on-loop keystone read
+            # (no-blocking-call-on-event-loop). One read per channel turn, not per tool call.
+            _pv_activation = await asyncio.to_thread(resolve_push_verdict_activation)
+
             def _tool_gate(event: Any) -> str:
                 result = self.ctx_builder.hooks.on_tool_call(
                     getattr(event, "title", "") or "",
                     session_key=session_key,
                     agent=agent,
+                    push_verdict_activation=_pv_activation,
                     **hook_gate_kwargs(event),
                 )
                 if result.action == TOOL_DENY:

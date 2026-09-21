@@ -23,6 +23,7 @@ import asyncio
 import logging
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -2255,6 +2256,56 @@ class AcpSessionHandle:
                 request_id,
                 {"outcome": {"outcome": OUTCOME_CANCELLED}},
             )
+
+    async def _refuse_push_verdict_activation_drift(self, event: AcpEvent) -> bool:
+        """Refuse a tool call from a shared runtime spawned BEFORE push-verdict activation.
+
+        The mirror of ``AcpClient._refuse_push_verdict_activation_drift`` for the shared-runtime
+        path: ``AcpRuntime`` dispatches permission requests through this handle, which does not
+        judge them, so without this floor a child spawned while gating was OFF stays credentialed
+        for the rest of an in-flight turn and an opaque ``git push`` it runs mid-turn would
+        publish an unjudged commit before the next-turn recycle or the periodic sweep. This is a
+        security floor, not a judging-policy concern, so it runs for EVERY permission request on
+        this handle, before any other gate.
+
+        The spawn state lives on the OWNING runtime (``self._runtime._spawn_push_verdict_activation``):
+        only a non-activated spawn can drift on (deactivation only relaxes), so an activated spawn
+        is never checked here and pays no keystone read. When this runtime was spawned
+        non-activated and gating is now ON, REFUSE the call, audit it, and retire the runtime
+        cooperatively (``_reap_pre_activation_drift`` releases the lease through the owning
+        provider before the kill) so the next turn respawns under the credential mask. Returns
+        True when refused.
+        """
+        from kiro_crew.sandbox import _push_verdict_masks_ssh
+
+        if getattr(self._runtime, "_spawn_push_verdict_activation", None) is not False:
+            return False
+        # Use the FAIL-CLOSED reader, as the sibling AcpClient path does: a malformed activation
+        # keystone (e.g. ``"enabled": "true"``, or a ``pinned_push_url`` carrying a token) makes
+        # ``activation()`` raise ``ActivationUnreadable``. ``_dispatch_events`` has only a
+        # try/finally, so letting that escape would abort the chat turn instead of refusing the
+        # tool call. ``_push_verdict_masks_ssh`` captures the unreadable case and reads it as
+        # ACTIVATED, so a damaged keystone refuses (fail closed) rather than crashes.
+        if not await asyncio.to_thread(_push_verdict_masks_ssh):
+            return False
+        logger.warning(
+            "push-verdict: refusing a tool call on a SHARED runtime spawned BEFORE gating was "
+            "activated -- its credential mask is fixed at spawn, so it still holds git "
+            "credentials this activated install must withhold. Retiring it so the next turn "
+            "respawns it under the mask [session=%s]",
+            self._session_id,
+        )
+        self._audit_handle_reject(
+            event.request_id,
+            event.tool_name or "tool__push_verdict_activation_drift",
+            "push_verdict_activation_drift_stale_child",
+        )
+        await self.reject_tool(event.request_id)
+        _retire = getattr(self._runtime, "_reap_pre_activation_drift", None)
+        if _retire is not None:
+            with suppress(Exception):
+                await _retire()
+        return True
 
     async def _deny_spec_disabled_tool(self, event: AcpEvent) -> bool:
         """Refuse a call the agent spec switched off. True when it was refused.
@@ -4830,6 +4881,12 @@ class AcpSessionHandle:
                     if _perm_event is None:
                         if msg.id is not None:
                             await self._runtime.send_error(msg.id, -32600, "invalid request id")
+                        continue
+                    # Security floor FIRST: a shared runtime spawned before push-verdict
+                    # activation still holds git credentials an activated install must withhold,
+                    # whether or not this handle judges permission requests. Refuse + retire it
+                    # before any other gate (mirrors AcpClient's ordering).
+                    if await self._refuse_push_verdict_activation_drift(_perm_event):
                         continue
                     # Before the fidelity gate: a tool the spec switched off is
                     # refused whether or not this consumer opted into the child

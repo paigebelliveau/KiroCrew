@@ -328,6 +328,10 @@ async def decompose(
             full_prompt = prompt
 
         text = ""
+        # Resolve activation OFF the event loop (no-blocking-call-on-event-loop):
+        # this decomposition-phase permission path is async, so reading the
+        # push-verdict keystone inline inside on_tool_call would open and read a
+        # file on the loop and stall every gateway session plus the heartbeat.
         async for event in client.stream(full_prompt):
             if event.kind == EVENT_TEXT_CHUNK:
                 text += event.text
@@ -338,10 +342,22 @@ async def decompose(
                 # spec content could otherwise trigger dangerous tools (fs/exec)
                 # during the planning phase, bypassing the execution-phase gate.
                 if ctx is not None and getattr(ctx, "hooks", None) is not None:
+                    from kiro_crew.security import (
+                        resolve_push_verdict_activation_for_command,
+                    )
+
+                    # Only a ``git push`` command needs the activation keystone, so a
+                    # non-publish planning tool call pays no keystone read (First Principles
+                    # "undeclared cost"); the helper keeps the publish read off the loop.
+                    _pv_activation = await resolve_push_verdict_activation_for_command(
+                        getattr(event, "shell_command", None),
+                        getattr(event, "title", "") or "",
+                    )
                     hook_result = ctx.hooks.on_tool_call(
                         event.title,
                         session_key=session_key,
                         agent=agent,
+                        push_verdict_activation=_pv_activation,
                         **hook_gate_kwargs(event),
                     )
                     if hook_result.action == TOOL_DENY:

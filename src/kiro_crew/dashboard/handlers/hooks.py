@@ -30,7 +30,11 @@ from kiro_crew.permission_floor import (
     OUTCOME_PENDING_APPROVAL,
     OUTCOME_REJECTED_TRANSPORT_FLOOR,
 )
-from kiro_crew.security import redact_credentials, redact_exfiltration_urls
+from kiro_crew.security import (
+    redact_credentials,
+    redact_exfiltration_urls,
+    resolve_push_verdict_activation_for_command,
+)
 from kiro_crew.validation import sanitize_string
 
 logger = logging.getLogger(__name__)
@@ -1283,10 +1287,20 @@ async def _run_hook_inner(
             hooks_gate = getattr(state.context_builder, "hooks", None)
             if hooks_gate is not None:
                 try:
+                    # Resolve the push-verdict activation keystone off the loop ONLY for a
+                    # git-publish command. ``is_denied`` consults the keystone only in its
+                    # publish branch, so a non-publish tool call needs no read -- the helper does
+                    # a cheap verb-anchored check first and reads nothing (no worker thread)
+                    # unless the command invokes ``git push``, keeping a never-publishing install
+                    # exactly as it was while still keeping the publish read off the gateway loop.
+                    _pv_activation = await resolve_push_verdict_activation_for_command(
+                        getattr(event, "shell_command", None), getattr(event, "title", "") or ""
+                    )
                     decision = hooks_gate.on_tool_call(
                         event.title,
                         session_key=session_key,
                         agent=agent or "",
+                        push_verdict_activation=_pv_activation,
                         **hook_gate_kwargs(event),
                     )
                 except Exception:

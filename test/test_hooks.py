@@ -509,7 +509,18 @@ class TestHookGateKwargs:
     # asking, on whose behalf, in which mode) rather than the tool call. Every
     # other keyword parameter is derived from the event, and the parity test
     # below demands the helper emit exactly those.
-    SURFACE_KWARGS = frozenset({"session_key", "agent", "app", "resolved_agent", "classifier_only"})
+    SURFACE_KWARGS = frozenset(
+        {
+            "session_key",
+            "agent",
+            "app",
+            "resolved_agent",
+            "classifier_only",
+            # Pre-resolved push-verdict activation an async caller reads OFF the loop and
+            # passes in (see security.resolve_push_verdict_activation); not event-derived.
+            "push_verdict_activation",
+        }
+    )
 
     # The gate's event-derived parameters and the event attribute each reads.
     # A new entry here means a new enforcement signal; the parity test below
@@ -831,6 +842,76 @@ class TestHookGateKwargs:
         # table too, or the table drifts into fiction.
         for rel in self.INFORMATIONAL_SITES | set(self.ALLOWED_OVERRIDES):
             assert (root / rel).exists(), rel
+
+
+class TestGateConsultRunsOffTheEventLoop:
+    """STRUCTURAL: the interactive gate's keystone read runs OFF the event loop AND only for a
+    git-publish command.
+
+    ``on_tool_call`` reaches the git-publish floor, which on a git-publish command reads
+    the push-verdict activation keystone (an ``open`` + JSON parse under the crew data home).
+    The read is deliberately live per publish (no cache -- see ``push_verdict.activation()``),
+    so on an activated, network-mounted data home it can stall. The two inline on-loop
+    permission handlers -- the dashboard chat runner and the webhook hook runner -- must keep
+    that read off the loop so a slow keystone read cannot freeze the gateway loop and its
+    heartbeat, AND must not pay it on a non-publish tool call (First Principles "undeclared
+    cost": only an activated install's publish uses the value).
+
+    They do both with ``await resolve_push_verdict_activation_for_command(command, title)``: it
+    does a cheap verb-anchored ``git push`` check first and resolves the keystone in a worker
+    thread only when the command could reach ``is_denied``'s publish branch, then passes the
+    result into ``on_tool_call`` as ``push_verdict_activation=``. A non-publish call pays one
+    lowercase + regex test and no I/O; a publish call's read is off the loop.
+
+    The pin is textual on purpose: the publish-gated off-loop resolution is the only thing that
+    both keeps the read off the loop and keeps a non-publish call free of it. An edit that drops
+    it and lets the gate read the keystone inline on every call would re-open both findings --
+    and nothing else would fail. Mutation check: delete either
+    ``resolve_push_verdict_activation_for_command`` call and the matching assertion flips.
+    """
+
+    SITES = (
+        "dashboard/chat_runner.py",
+        "dashboard/handlers/hooks.py",
+    )
+
+    @staticmethod
+    def _resolves_activation_off_loop(text: str) -> bool:
+        """True when the site resolves the push-verdict activation keystone OFF the loop and ONLY
+        for a git-publish command, then passes the result into the gate -- rather than reading
+        the keystone on every tool call or inline on the loop. The pattern:
+        ``await resolve_push_verdict_activation_for_command(...)`` does a cheap verb-anchored
+        ``git push`` check first and resolves the keystone in a worker thread only when the
+        command could reach ``is_denied``'s publish branch, then its result is handed to
+        ``on_tool_call`` as ``push_verdict_activation=``. So a non-publish tool call pays no
+        keystone read at all (First Principles "undeclared cost"), and the publish read never
+        runs on the loop (no-blocking-call-on-event-loop)."""
+        import re
+
+        resolves_off_loop = (
+            re.search(r"await resolve_push_verdict_activation_for_command\(", text) is not None
+        )
+        passes_it_in = re.search(r"push_verdict_activation\s*=", text) is not None
+        return resolves_off_loop and passes_it_in
+
+    def test_interactive_consults_run_in_a_worker_thread(self):
+        from pathlib import Path
+
+        import kiro_crew
+
+        root = Path(kiro_crew.__file__).resolve().parent
+        offenders: list[str] = []
+        for rel in self.SITES:
+            path = root / rel
+            assert path.exists(), rel
+            text = path.read_text(encoding="utf-8")
+            if not self._resolves_activation_off_loop(text):
+                offenders.append(
+                    f"{rel}: the push-verdict activation keystone is not resolved publish-gated "
+                    f"off-loop via `await resolve_push_verdict_activation_for_command(...)` and "
+                    f"passed in as `push_verdict_activation=`"
+                )
+        assert not offenders, "\n".join(offenders)
 
 
 class TestToolCallEvaluatesRawCommand:

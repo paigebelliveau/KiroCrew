@@ -176,6 +176,28 @@ class AcpSessionProvider(LLMProvider):
             cap=CHAT_RUNTIME_CAP,
         )
         self._runtime_lease = acquisition.lease
+        # Back-reference so the pre-activation drift sweep can retire this runtime COOPERATIVELY:
+        # the sweep iterates runtimes and would otherwise attempt a kill the ownership gate
+        # refuses while this lease is outstanding (GPT 6.1 finding: the credentialed process then
+        # survives). Giving the runtime a handle to its lease-holding provider lets the sweep
+        # release the lease through its owner first, so the kill is authorized and the process is
+        # actually retired. Set only for the owning (lease-holding) provider; a subagent returned
+        # early above and never records one.
+        try:
+            runtime._lease_holder_provider = self  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            # A runtime shape without the slot (a test stand-in) simply does not gain the
+            # back-reference; the sweep falls back to its best-effort kill, as before.
+            pass
+
+    def _clear_runtime_lease_backref(self) -> None:
+        """Drop the runtime's back-reference to this provider when the lease is given up."""
+        runtime = self._runtime
+        try:
+            if getattr(runtime, "_lease_holder_provider", None) is self:
+                runtime._lease_holder_provider = None  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            pass
 
     def _claim_shared_turn(self) -> str | None:
         """Defend the SHARED runtime for the length of this subagent's turn.
@@ -448,6 +470,7 @@ class AcpSessionProvider(LLMProvider):
         if lease is None:
             return
         self._runtime_lease = None
+        self._clear_runtime_lease_backref()
         await RUNTIME_OWNERSHIP.release(lease)
 
     async def shutdown(self) -> None:
