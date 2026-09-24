@@ -3148,8 +3148,28 @@ answer is not permission: a raised evaluation and a `Decision` without
   untrusted UNC share, a device namespace, a drive-relative target or a
   `..`-climbing suffix is refused before `realpath` can probe it, while a
   link whose target is another local directory is rewritten to that target
-  so benign junctions still resolve; canonicalizes through every symlink on
-  POSIX, and refuses a resolved
+  so benign junctions still resolve; on Windows every one of those steps runs with
+  the candidate's existing components held open
+  (`pinned_fs.hold_no_follow_chain`, reached through `_screen_and_resolve_held`), each
+  classified off its OWN no-follow descriptor rather than by a second look at the name,
+  and the canonical path is then read THROUGH the deepest held descriptor
+  (`pinned_fs.fd_real_path`) rather than by re-running `realpath` on the name. That
+  closes the `look -> look` window: a junction swapped onto a component after the walk
+  changes a name the resolution no longer consults, so there is no second lookup for it
+  to redirect; a step that rewrites a link takes a fresh hold on the replacement. The
+  screen is bounded by the same boundary as the resolution: a walk that stops short
+  covers a prefix, and neither half then touches a name below it -- the screen does not
+  `lstat` one and the resolution does not read one through a descriptor it never held,
+  because a name holding nothing when the walk passes it can be created and swapped
+  afterwards. Nothing is lost by that, since the walk classified every component it
+  proved off that component's own descriptor and the unproven remainder is re-attached
+  as text. A component the
+  walk finds to be
+  a link after all, and a component whose state it cannot read at all, both refuse
+  rather than resolve; a component that holds NOTHING does not, because a path that
+  does not exist yet is what every write caller hands in. POSIX keeps
+  `realpath` on the string the gates judged and
+  canonicalizes through every symlink, and both platforms refuse a resolved
   target under a sensitive root, so an innocent-looking path that resolves into a
   blocked root is refused through the link. The **canonical** path is what reaches
   `runner.start_background`, not the raw argument, because validating one string and

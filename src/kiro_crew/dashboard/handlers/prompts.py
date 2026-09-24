@@ -3333,7 +3333,12 @@ async def api_skill_detail(request: web.Request) -> web.Response:
         denied = _deny_foreign_app_skill_slot(request, state, session_key, "skill_detail")
         if denied is not None:
             return denied
-    content = skills.load_skill(name)
+    # Offloaded to a worker thread: load_skill resolves the skill path through
+    # validate_file_path, whose Windows held-chain walk opens each component with a
+    # synchronous CreateFileW. A skill under an admitted UNC data home on a stalled
+    # share would otherwise freeze the gateway loop and the heartbeat here. Keeping
+    # acquisition, screening, resolution and release together on the worker.
+    content = await asyncio.to_thread(skills.load_skill, name)
     if content is None and name.startswith("package/"):
         pkg_name = name[len("package/") :]  # strip "package/" prefix
         # The capability manager owns skill listing + path resolution; it

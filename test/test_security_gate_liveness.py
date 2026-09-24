@@ -164,12 +164,25 @@ def _url_payload_command(n: int) -> str:
 #: holds the canonical spelling and is off the event loop, so the anchors resolve
 #: inline. No new entry point, no target, no matching rule and no threshold moved.
 #:
+#: Raised again, from 28,412, for ``is_sensitive_prevalidated_bounded_path`` in
+#: ``paths.py`` and the ``anchors_inline`` seam that backs it. A path validated on
+#: the event loop must match its already-resolved candidate tail LEXICALLY (never
+#: re-resolve an unheld tail that could sit on a stalled share) yet still resolve its
+#: ``$HOME`` anchors through the BOUNDED resolver pool, so one stuck anchor costs the
+#: pool's time limit rather than freezing the whole loop. The two concerns were tied
+#: to a single ``pre_resolved`` flag; the seam splits them so the candidate stays
+#: lexical while the anchors go bounded. The cost is the new entry point, the seam
+#: parameter threaded through ``_path_in_home_dirs`` and the keystone helper, and the
+#: facade machinery for one more exported name -- an owner-table row, a manifest row
+#: and a ``TYPE_CHECKING`` line. No new matching pass and no threshold moved; the
+#: fence's lexical-tail property is unchanged.
+#:
 #: The number IS the package's measured total, carrying no spare room: a ratchet with
 #: headroom admits exactly the unreviewed growth it exists to catch, so the next line
 #: added here fails this gate and has to be re-pinned deliberately, with its reason
 #: written above. The guards that detect a monolith growing back are the per-file cap
 #: and the facade's share below, and both must stay untouched.
-_PACKAGE_LINE_BUDGET = 28_412
+_PACKAGE_LINE_BUDGET = 28_460
 
 #: Ceiling on any ONE file in the package. This is what the bound is really for --
 #: a package total says nothing about a single file growing back into a second

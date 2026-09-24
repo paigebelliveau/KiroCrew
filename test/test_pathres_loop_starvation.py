@@ -185,6 +185,67 @@ class TestIsSensitiveResolvedPath:
             ) is security.paths.path_contains_sensitive(candidate)
 
 
+class TestIsSensitivePrevalidatedBoundedPath:
+    """The on-loop fence: a canonical candidate matched LEXICALLY (never
+    re-resolved), with the anchors resolved through the BOUNDED pool so a stalled
+    network home costs the pool's time limit, not the event loop."""
+
+    def test_a_canonical_credential_path_is_still_refused(self, monkeypatch) -> None:
+        # The candidate is never re-resolved -- refusing candidate resolution
+        # must not change the verdict.
+        monkeypatch.setattr(security, "_resolved_forms_bounded", _refuse_candidate_resolution)
+        real = os.path.realpath(os.path.expanduser("~/.aws/credentials"))
+        assert security.is_sensitive_prevalidated_bounded_path(real) is True
+
+    def test_a_canonical_benign_path_passes(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setattr(security, "_resolved_forms_bounded", _refuse_candidate_resolution)
+        benign = tmp_path / "skills" / "tiny" / "SKILL.md"
+        benign.parent.mkdir(parents=True)
+        benign.write_text("---\nname: tiny\n---\n")
+        assert (
+            security.is_sensitive_prevalidated_bounded_path(os.path.realpath(str(benign))) is False
+        )
+        assert security.is_sensitive_prevalidated_bounded_path("") is False
+
+    def test_the_keystone_publish_artifact_rule_still_applies(self, monkeypatch) -> None:
+        monkeypatch.setattr(security, "_resolved_forms_bounded", _refuse_candidate_resolution)
+        parents = security.paths._home_dir_targets(security.paths._KEYSTONE_ARTIFACT_PARENTS)
+        assert parents, "no keystone artifact parent resolved; the fixture home is wrong"
+        artifact = os.path.join(sorted(parents)[0], "x.tmp")
+        assert security.is_sensitive_prevalidated_bounded_path(artifact) is True
+
+    def test_the_anchors_go_through_the_bounded_pool_not_inline(self, monkeypatch) -> None:
+        # The whole point of this fence vs is_sensitive_resolved_path: the anchor
+        # resolution is BOUNDED. On a cold cache it must reach the pool (so a
+        # wedged home costs the pool's limit, not the loop), where
+        # is_sensitive_resolved_path would resolve the same anchors inline.
+        monkeypatch.setattr(security.paths, "_home_targets_cache", {})
+        reached: list[str] = []
+        real_runner = security.paths._run_resolution_bounded
+
+        def spy(expanded, worker, **kwargs):
+            reached.append(expanded)
+            return real_runner(expanded, worker, **kwargs)
+
+        monkeypatch.setattr(security.paths, "_run_resolution_bounded", spy)
+        real = os.path.realpath(os.path.expanduser("~/.aws/credentials"))
+        assert security.is_sensitive_prevalidated_bounded_path(real) is True
+        assert reached, "the bounded fence resolved its anchors inline, not through the pool"
+
+    def test_the_verdict_matches_the_inline_variant(self, tmp_path, monkeypatch) -> None:
+        # Same decision as is_sensitive_resolved_path on the same input; only the
+        # anchor-resolution route differs.
+        monkeypatch.setattr(security.paths, "_home_targets_cache", {})
+        cred = os.path.realpath(os.path.expanduser("~/.aws/credentials"))
+        benign = os.path.realpath(str(tmp_path / "notes.md"))
+        assert security.is_sensitive_prevalidated_bounded_path(
+            cred
+        ) == security.is_sensitive_resolved_path(cred)
+        assert security.is_sensitive_prevalidated_bounded_path(
+            benign
+        ) == security.is_sensitive_resolved_path(benign)
+
+
 # path relative to ``src`` -> number of ``is_sensitive_resolved_path`` calls.
 _EXPECTED_GATE_CALL_SITES: dict[str, int] = {
     # ``_iter_skill_files``: one check per directory (prune) and per SKILL.md

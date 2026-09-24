@@ -45,10 +45,15 @@ from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Callable
 
+from kiro_crew import platform_compat
 from kiro_crew.atomic_write import atomic_write, atomic_write_at
 from kiro_crew.platform_compat import open_file_no_reparse, pin_directory
 
 __all__ = [
+    "CHAIN_HELD",
+    "CHAIN_MISSING",
+    "CHAIN_REPARSE",
+    "HeldChain",
     "PUT_BACK_FAILED",
     "PUT_BACK_NAME_TAKEN",
     "PinnedPathRefusal",
@@ -71,6 +76,7 @@ __all__ = [
     "drain_verified_chain",
     "fatal_skip_reporter",
     "fd_real_path",
+    "held_no_follow_chain",
     "is_reparse_point",
     "is_regular_at",
     "omits_wanted_data",
@@ -1780,6 +1786,207 @@ def close_all(fds: Iterable[int]) -> None:
             os.close(fd)
         except OSError:
             pass
+
+
+#: Outcomes of :func:`hold_no_follow_chain`. ``CHAIN_HELD`` means every component of
+#: the path exists and none of them is a reparse point; ``CHAIN_REPARSE`` means the
+#: walk stopped at one and is holding it, so its target can be read without a second
+#: look by name; ``CHAIN_MISSING`` means the walk stopped without pinning the leaf,
+#: either because a name holds nothing -- and a name holding nothing cannot redirect a
+#: resolution -- or because the leaf could be classified but not pinned. Both leave the
+#: same obligation on the caller, which is why they are one outcome: what the walk did
+#: not prove is named by ``held`` and must not be resolved. An INTERIOR component that
+#: cannot be opened is neither of these; the walk raises, because it can say nothing
+#: about what sits there.
+CHAIN_HELD = "held"
+CHAIN_REPARSE = "reparse"
+CHAIN_MISSING = "missing"
+
+
+@dataclass(frozen=True)
+class HeldChain:
+    """The state of one no-follow walk, with the descriptors it is still holding.
+
+    ``held`` is the absolute path of the DEEPEST component the walk PROVED, or the
+    path's anchor when it proved none. It is the walk's whole answer about position,
+    and deliberately the only one: a caller that must canonicalize a path the walk did
+    not reach the end of needs the boundary, and the component the walk STOPPED on is
+    not it -- under :data:`CHAIN_MISSING` that name is sometimes an absent name whose
+    parent is proven and sometimes a real file that is proven itself. Reporting both
+    would offer a caller a choice where only one answer is safe.
+
+    ``fds`` is the caller's to release, with :func:`close_all` or by using
+    :func:`held_no_follow_chain` instead. They are what the walk BUYS, not
+    bookkeeping: each component was opened with ``OPEN_REPARSE_POINT`` and its link-ness
+    read off the handle, and the DEEPEST held descriptor is the one a caller resolves
+    THROUGH -- :func:`fd_real_path` reads the kernel's own final path for the inode
+    already open, so the canonical answer names the object the walk proved and no second
+    lookup by name is left for a junction swapped in afterwards to redirect. Dropping the
+    descriptors ends that -- a resolution once they are closed is the by-name lookup the
+    walk exists to replace -- which is why the context manager exists and why a caller
+    must resolve inside it. The walk asks only for attribute-only access, so it does NOT
+    pin a component against a concurrent rename or delete; it does not need to, because
+    the guarantee rides on the descriptor already naming the real inode, not on freezing
+    the name.
+
+    What a held descriptor does NOT buy is exclusivity over what its directory
+    CONTAINS: a name that holds nothing when the walk passes it can be filled
+    afterwards, so everything below ``held`` is unproven and a caller must not
+    resolve it by name.
+    """
+
+    outcome: str
+    fds: tuple[int, ...]
+    held: str
+
+
+def _chain_components(path: str) -> tuple[str, tuple[str, ...]] | None:
+    """Split *path* into its anchor and the components below it, or ``None``.
+
+    ``None`` for a path with no anchor: a relative path's components resolve against
+    a current directory this walk never inspected, so there is no chain to hold.
+    """
+    parts = PurePath(path).parts
+    if not parts or not os.path.isabs(path):
+        return None
+    return parts[0], parts[1:]
+
+
+def hold_no_follow_chain(path: str, *, max_depth: int) -> HeldChain:
+    """Walk *path* component by component without following anything, and HOLD it.
+
+    The answer to a validator that has judged a path by name and is about to resolve
+    it: between those two steps a component can be swapped for a link, and on Windows
+    resolving a link aimed at a share is an outbound SMB authentication rather than a
+    local lookup. This is the Windows mechanism, and it is the only one reached in
+    production -- the sole caller, ``hooks.validate_file_path``, invokes it under
+    ``os.name == "nt"`` -- so the walk is written for Windows, which has no ``openat``:
+
+    Every component is opened by its full path with ``OPEN_REPARSE_POINT`` (see
+    :func:`kiro_crew.platform_compat.open_entry_no_follow`), so a component that is
+    already a link is opened AS the link and reported rather than traversed, and its
+    link-ness is read off the HANDLE -- the one thing a name swap cannot exchange. The
+    open asks for attribute-only access, so the walk does not pin a component against a
+    concurrent rename or delete. It does not need to: the caller does not resolve the
+    path by name afterwards, it resolves THROUGH the deepest held descriptor
+    (:func:`fd_real_path`), whose final path names the inode the walk already proved. A
+    junction swapped in after the walk changes a NAME, and the descriptor stays bound to
+    the inode the walk proved rather than to the name -- so the resolution the hold hands
+    back is immune to it.
+
+    Stops at the first component that is a link (:data:`CHAIN_REPARSE`) or that holds
+    nothing (:data:`CHAIN_MISSING`), and otherwise reaches the leaf
+    (:data:`CHAIN_HELD`). A missing component ends the walk without refusing: the rest
+    of the path names nothing, and a name that does not exist cannot redirect a
+    resolution.
+
+    Raises ``OSError`` for every other failure -- a permission denial, a sharing
+    violation, an unreachable host -- so the caller fails closed on the one case where
+    what is at that component is genuinely unknown. Refuses a path deeper than
+    *max_depth* components for the reason the walk itself is bounded: one open per
+    component makes an adversarially deep path a stall inside the guard.
+
+    A relative path is refused (``ValueError``): its components resolve against a
+    current directory this walk never inspected.
+    """
+    split = _chain_components(path)
+    if split is None:
+        raise ValueError(f"refusing to hold a path with no anchor: {path!r}")
+    anchor, components = split
+    if len(components) > max_depth:
+        raise ValueError(f"refusing to hold a path {len(components)} components deep")
+
+    fds: list[int] = []
+    try:
+        return _hold_chain_by_path(anchor, components, fds)
+    except BaseException:
+        close_all(fds)
+        raise
+
+
+def _hold_chain_by_path(anchor: str, components: tuple[str, ...], fds: list[int]) -> HeldChain:
+    """The by-name route of :func:`hold_no_follow_chain`, which is the Windows one.
+
+    Each component is opened by its full path with ``OPEN_REPARSE_POINT``, and its
+    link-ness is read off the HANDLE rather than by a second look at the name. The walk
+    takes attribute-only access, so it does not freeze a component against rename or
+    delete; the swap it defeats is defeated at RESOLUTION time instead, where the caller
+    reads the final path through the deepest held descriptor (:func:`fd_real_path`)
+    rather than re-traversing names a junction could have been planted into.
+
+    The anchor itself (``C:\\``, ``\\\\server\\share\\``) is not opened. A drive root
+    or a share root cannot be a reparse point, so there is nothing there to prove, and
+    on a share the open would be one more SMB round-trip to a host the UNC gate has
+    already admitted by configuration.
+
+    A link is found by asking the DESCRIPTOR
+    (:func:`kiro_crew.platform_compat.win_fd_is_link`), not the name. On POSIX
+    the open refuses a symlink with ``ELOOP`` instead, which is not caught here: this
+    route is the one taken where that refusal does not exist, and letting ``ELOOP``
+    propagate means a POSIX caller that reaches it fails closed rather than walking on.
+
+    An INTERIOR component that exists and cannot be opened is a refusal, not a boundary.
+    A resolution passes THROUGH it, and a component that cannot be opened cannot be
+    classified either, so reporting a boundary above it would hand the caller a path
+    whose remaining text names an object nothing has looked at -- and the caller's own
+    resolution follows it. Only the LAST component survives that, because a resolution
+    ends there; it is classified through a mask that cannot be refused by another
+    opener's share mode, and left unheld.
+    """
+    prefix = anchor
+    proven = anchor
+    last_index = len(components) - 1
+    for index, component in enumerate(components):
+        prefix = os.path.join(prefix, component)
+        is_last = index == last_index
+        try:
+            fd = platform_compat.open_entry_no_follow(prefix)
+        except OSError as exc:
+            if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+                return HeldChain(CHAIN_MISSING, tuple(fds), proven)
+            # Any other open failure fails closed. The walk asks for a single
+            # attribute-only mask (no traverse right -- see
+            # :func:`kiro_crew.platform_compat.open_entry_no_follow`), so there is no
+            # weaker mask to drop to: a component the walk cannot open is one it cannot
+            # classify, and a name whose link-ness is unknown must never be re-attached
+            # as text for the caller to resolve -- that is the junction-follow this walk
+            # exists to prevent. The error propagates and the caller fails closed.
+            raise
+        fds.append(fd)
+        if platform_compat.win_fd_is_link(fd):
+            return HeldChain(CHAIN_REPARSE, tuple(fds), proven)
+        proven = prefix
+        if not is_last and not _stat.S_ISDIR(os.fstat(fd).st_mode):
+            # A file part-way along the path: everything below it names nothing, so
+            # there is no further component that could redirect anything.
+            return HeldChain(CHAIN_MISSING, tuple(fds), proven)
+    return HeldChain(CHAIN_HELD, tuple(fds), prefix)
+
+
+@contextmanager
+def held_no_follow_chain(path: str, *, max_depth: int) -> Iterator[HeldChain]:
+    """:func:`hold_no_follow_chain` with the descriptors released on the way out.
+
+    Resolve the path INSIDE the block. The guarantee the walk buys lasts exactly as
+    long as the descriptors do, so a resolution after the block has closed them is
+    the unprotected resolution the walk exists to replace.
+
+    The hold is RESOLVE-ONLY: the caller only reads/canonicalises the held names and
+    never writes into them. The held directories keep ``FILE_SHARE_READ_WRITE`` so a
+    concurrent ``os.replace`` into a pinned ancestor is not refused machine-wide -- the
+    walk does not need to deny it, because the caller resolves THROUGH the held
+    descriptors (:func:`fd_real_path`), not by re-traversing names. A component swapped,
+    renamed, or converted in place after the walk changes a NAME; the descriptor stays
+    bound to the inode the walk proved, so the final path it hands back is unaffected.
+    That is what lets the walk keep ``FILE_SHARE_READ_WRITE`` and charge no concurrent
+    writer on the machine for a containment property the descriptor already carries (see
+    the sharing rule under :func:`kiro_crew.platform_compat.open_entry_no_follow`).
+    """
+    chain = hold_no_follow_chain(path, max_depth=max_depth)
+    try:
+        yield chain
+    finally:
+        close_all(chain.fds)
 
 
 @dataclass(frozen=True)
