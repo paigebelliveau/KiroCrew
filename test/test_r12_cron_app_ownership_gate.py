@@ -56,6 +56,14 @@ def grant_crons(monkeypatch: pytest.MonkeyPatch) -> None:
         "_app_api_allowlist",
         lambda name: ("/api/crons",) if name in (APP_A, APP_B) else (),
     )
+    # The scope gate reads enablement through the `apps.permissions` seam (the
+    # auth layer's own enablement question), denying a disabled / not-installed
+    # app, so a granted app must read as enabled there -- these synthetic apps are
+    # absent from the real installed.json, which would otherwise deny them.
+    monkeypatch.setattr(
+        "kiro_crew.apps.permissions.is_app_enabled",
+        lambda name: name in (APP_A, APP_B),
+    )
 
 
 async def _seed(svc: CronService) -> dict[str, str]:
@@ -75,7 +83,7 @@ def _server(svc: CronService, app_claim: str) -> web.Application:
         request["user"] = OWNER_SUBJECT
         request["app"] = app_claim
         if app_claim:
-            denied = token_auth._enforce_app_scope(request, app_claim, request.path)
+            denied = await token_auth._enforce_app_scope(request, app_claim, request.path)
             if denied is not None:
                 return denied
         return await handler(request)

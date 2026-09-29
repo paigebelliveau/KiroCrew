@@ -73,6 +73,12 @@ def config_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setenv("KIROCREW_HOME", str(crew))
     monkeypatch.setattr(app_routes, "sel", lambda: _Sel())
     monkeypatch.setattr(app_routes, "get_app", lambda name: {"name": name, "enabled": True})
+    # token_auth.app_token_path_allowed now denies at the door for any app whose
+    # enablement is not provably True (fail-closed). It reads that through the
+    # `apps.permissions` enablement seam (the auth layer's own question), not
+    # through get_app, so stub it here to match the enabled:True get_app above --
+    # these tests exercise a path grant for an enabled app, not the disable gate.
+    monkeypatch.setattr("kiro_crew.apps.permissions.is_app_enabled", lambda name: True)
     from kiro_crew.apps.manager import app_data_dir
 
     path = app_data_dir(APP) / "config.json"

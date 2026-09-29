@@ -40,11 +40,13 @@ def _clear_module_caches():
     later one (especially the cross-app tests that patch ``get_app_manifest``).
     """
     from kiro_crew.dashboard import ws_event_scope as _wes
+
     _wes._exposeto_cache.clear()
     _wes._sel_last_audit.clear()
     yield
     _wes._exposeto_cache.clear()
     _wes._sel_last_audit.clear()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -97,7 +99,14 @@ def _clear_ws_scope_module_caches(monkeypatch):
     False, or seed ``_declared_cache`` with a disabled entry).
     """
     from kiro_crew.dashboard import ws_event_scope as mod
+
     monkeypatch.setattr(mod, "is_app_enabled", lambda _name: True)
+    # The app-token scope gate (`token_auth.app_token_path_allowed`) reads
+    # enablement through the `apps.permissions` seam and denies a disabled /
+    # not-installed app, so pin it True as the same DEFAULT world for the
+    # synthetic app names, matching the `is_app_enabled` default above.
+    # Revocation tests override it explicitly.
+    monkeypatch.setattr("kiro_crew.apps.permissions.is_app_enabled", lambda _name: True)
     for cache in (mod._declared_cache, mod._exposeto_cache, mod._sel_last_audit):
         cache.clear()
     for pending in (mod._declared_refreshing, mod._exposeto_refreshing):
@@ -112,6 +121,7 @@ def _clear_ws_scope_module_caches(monkeypatch):
 # ---------------------------------------------------------------------------
 # build_allowed_event_set
 # ---------------------------------------------------------------------------
+
 
 class TestBuildAllowedEventSet:
     def test_empty_declarations(self):
@@ -132,123 +142,202 @@ class TestBuildAllowedEventSet:
 # Tier 0: always-allowed events
 # ---------------------------------------------------------------------------
 
+
 class TestTier0AlwaysAllowed:
     def test_dashboard_always_allowed_for_any_app(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "dashboard", {},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "dashboard",
+                {},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is True
+        )
 
     def test_dashboard_allowed_even_with_empty_permissions(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "dashboard", {"version": "3.0"},
-            app="auto-improvement", allowed_events=frozenset(), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "dashboard",
+                {"version": "3.0"},
+                app="auto-improvement",
+                allowed_events=frozenset(),
+                state=state,
+            )
+            is True
+        )
 
 
 # ---------------------------------------------------------------------------
 # Tier 1: slot-scoped events — own-slot visibility
 # ---------------------------------------------------------------------------
 
+
 class TestSlotScopedOwnSlot:
     def test_own_slot_chat_chunk_allowed(self):
         slot = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="mochi-pet")
         state = _make_state({"mochi-pet": slot})
-        assert ws_event_allowed(
-            "chat_chunk", {"slot": "mochi-pet", "content": "hi"},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "chat_chunk",
+                {"slot": "mochi-pet", "content": "hi"},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is True
+        )
 
     def test_own_slot_tool_call_allowed(self):
         slot = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="mochi-pet")
         state = _make_state({"mochi-pet": slot})
-        assert ws_event_allowed(
-            "tool_call", {"slot": "mochi-pet"},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "tool_call",
+                {"slot": "mochi-pet"},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is True
+        )
 
     def test_other_app_slot_denied_without_declaration(self):
-        slot = _make_slot(owner_app="auto-improvement", origin=SlotOrigin.APP, key="auto-improvement")
+        slot = _make_slot(
+            owner_app="auto-improvement", origin=SlotOrigin.APP, key="auto-improvement"
+        )
         state = _make_state({"auto-improvement": slot})
-        assert ws_event_allowed(
-            "chat_chunk", {"slot": "auto-improvement"},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "chat_chunk",
+                {"slot": "auto-improvement"},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is False
+        )
 
     def test_missing_slot_denied(self):
         state = _make_state({})
-        assert ws_event_allowed(
-            "chat_chunk", {"slot": "ghost"},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "chat_chunk",
+                {"slot": "ghost"},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is False
+        )
 
     def test_slot_field_none_denied(self):
         state = _make_state({})
         # slot-scoped event type but no slot key in data
-        assert ws_event_allowed(
-            "chat_chunk", {},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "chat_chunk",
+                {},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
 # Tier 1: slot-scoped events — slots:user
 # ---------------------------------------------------------------------------
 
+
 class TestSlotScopedUserSlots:
     def test_user_slot_allowed_with_slots_user(self):
         slot = _make_slot(owner_app="", origin=SlotOrigin.USER, key="chat-1")
         state = _make_state({"chat-1": slot})
-        assert ws_event_allowed(
-            "chat_message", {"slot": "chat-1"},
-            app="mochi-pet", allowed_events=_allowed("slots:user"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "chat_message",
+                {"slot": "chat-1"},
+                app="mochi-pet",
+                allowed_events=_allowed("slots:user"),
+                state=state,
+            )
+            is True
+        )
 
     def test_user_slot_denied_without_slots_user(self):
         slot = _make_slot(owner_app="", origin=SlotOrigin.USER, key="chat-1")
         state = _make_state({"chat-1": slot})
-        assert ws_event_allowed(
-            "chat_message", {"slot": "chat-1"},
-            app="mochi-pet", allowed_events=_allowed("notification"), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "chat_message",
+                {"slot": "chat-1"},
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is False
+        )
 
     def test_app_slot_not_covered_by_slots_user(self):
         # slots:user only covers USER-origin slots, not APP-origin ones
         slot = _make_slot(owner_app="other-app", origin=SlotOrigin.APP, key="other-app")
         state = _make_state({"other-app": slot})
-        assert ws_event_allowed(
-            "chat_chunk", {"slot": "other-app"},
-            app="mochi-pet", allowed_events=_allowed("slots:user"), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "chat_chunk",
+                {"slot": "other-app"},
+                app="mochi-pet",
+                allowed_events=_allowed("slots:user"),
+                state=state,
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
 # Tier 1: slot-scoped events — slots:all
 # ---------------------------------------------------------------------------
 
+
 class TestSlotScopedSlotsAll:
     def test_slots_all_covers_any_slot(self):
         slot = _make_slot(owner_app="other-app", origin=SlotOrigin.APP, key="other")
         state = _make_state({"other": slot})
-        assert ws_event_allowed(
-            "chat_chunk", {"slot": "other"},
-            app="mochi-pet", allowed_events=_allowed("slots:all"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "chat_chunk",
+                {"slot": "other"},
+                app="mochi-pet",
+                allowed_events=_allowed("slots:all"),
+                state=state,
+            )
+            is True
+        )
 
     def test_slots_all_covers_user_slot(self):
         slot = _make_slot(owner_app="", origin=SlotOrigin.USER, key="chat-1")
         state = _make_state({"chat-1": slot})
-        assert ws_event_allowed(
-            "slot_title", {"slot": "chat-1"},
-            app="any-app", allowed_events=_allowed("slots:all"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "slot_title",
+                {"slot": "chat-1"},
+                app="any-app",
+                allowed_events=_allowed("slots:all"),
+                state=state,
+            )
+            is True
+        )
 
 
 # ---------------------------------------------------------------------------
 # Tier 1: slot-scoped events — slots:app:<name> with exposeToApps opt-in
 # ---------------------------------------------------------------------------
+
 
 class TestSlotScopedCrossApp:
     def _state_with_expose(self, target_app: str, expose_to: list[str]) -> MagicMock:
@@ -266,12 +355,16 @@ class TestSlotScopedCrossApp:
         manifest = MagicMock()
         manifest.permissions.exposeToApps = ["monitor-app"]
         with patch("kiro_crew.dashboard.ws_event_scope.get_app_manifest", return_value=manifest):
-            assert ws_event_allowed(
-                "chat_chunk", {"slot": "mochi-pet"},
-                app="monitor-app",
-                allowed_events=_allowed("slots:app:mochi-pet"),
-                state=state,
-            ) is True
+            assert (
+                ws_event_allowed(
+                    "chat_chunk",
+                    {"slot": "mochi-pet"},
+                    app="monitor-app",
+                    allowed_events=_allowed("slots:app:mochi-pet"),
+                    state=state,
+                )
+                is True
+            )
 
     def test_cross_app_denied_when_target_does_not_opt_in(self):
         slot = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="mochi-pet")
@@ -279,12 +372,16 @@ class TestSlotScopedCrossApp:
         manifest = MagicMock()
         manifest.permissions.exposeToApps = []  # no opt-in
         with patch("kiro_crew.dashboard.ws_event_scope.get_app_manifest", return_value=manifest):
-            assert ws_event_allowed(
-                "chat_chunk", {"slot": "mochi-pet"},
-                app="monitor-app",
-                allowed_events=_allowed("slots:app:mochi-pet"),
-                state=state,
-            ) is False
+            assert (
+                ws_event_allowed(
+                    "chat_chunk",
+                    {"slot": "mochi-pet"},
+                    app="monitor-app",
+                    allowed_events=_allowed("slots:app:mochi-pet"),
+                    state=state,
+                )
+                is False
+            )
 
     def test_cross_app_allowed_with_wildcard_expose(self):
         slot = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="mochi-pet")
@@ -292,12 +389,16 @@ class TestSlotScopedCrossApp:
         manifest = MagicMock()
         manifest.permissions.exposeToApps = ["*"]
         with patch("kiro_crew.dashboard.ws_event_scope.get_app_manifest", return_value=manifest):
-            assert ws_event_allowed(
-                "chat_chunk", {"slot": "mochi-pet"},
-                app="any-app",
-                allowed_events=_allowed("slots:app:mochi-pet"),
-                state=state,
-            ) is True
+            assert (
+                ws_event_allowed(
+                    "chat_chunk",
+                    {"slot": "mochi-pet"},
+                    app="any-app",
+                    allowed_events=_allowed("slots:app:mochi-pet"),
+                    state=state,
+                )
+                is True
+            )
 
     def test_cross_app_without_slots_app_declaration_denied(self):
         slot = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="mochi-pet")
@@ -306,62 +407,98 @@ class TestSlotScopedCrossApp:
         manifest.permissions.exposeToApps = ["monitor-app"]
         with patch("kiro_crew.dashboard.ws_event_scope.get_app_manifest", return_value=manifest):
             # monitor-app didn't declare slots:app:mochi-pet
-            assert ws_event_allowed(
-                "chat_chunk", {"slot": "mochi-pet"},
-                app="monitor-app",
-                allowed_events=_allowed("slots:user"),  # wrong declaration
-                state=state,
-            ) is False
+            assert (
+                ws_event_allowed(
+                    "chat_chunk",
+                    {"slot": "mochi-pet"},
+                    app="monitor-app",
+                    allowed_events=_allowed("slots:user"),  # wrong declaration
+                    state=state,
+                )
+                is False
+            )
 
 
 # ---------------------------------------------------------------------------
 # Subagent events — independent dimension
 # ---------------------------------------------------------------------------
 
+
 class TestSubagentEvents:
     def test_subagent_own_slot_always_allowed(self):
         slot = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="mochi-pet")
         state = _make_state({"mochi-pet": slot})
-        assert ws_event_allowed(
-            "subagent_done", {"slot": "mochi-pet"},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "subagent_done",
+                {"slot": "mochi-pet"},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is True
+        )
 
     def test_subagent_user_slot_requires_subagent_user(self):
         slot = _make_slot(owner_app="", origin=SlotOrigin.USER, key="chat-1")
         state = _make_state({"chat-1": slot})
         # Without subagent:user, denied
-        assert ws_event_allowed(
-            "subagent_done", {"slot": "chat-1"},
-            app="mochi-pet", allowed_events=_allowed("slots:user"), state=state,
-        ) is True  # slots:user falls through to slot visibility which allows it
+        assert (
+            ws_event_allowed(
+                "subagent_done",
+                {"slot": "chat-1"},
+                app="mochi-pet",
+                allowed_events=_allowed("slots:user"),
+                state=state,
+            )
+            is True
+        )  # slots:user falls through to slot visibility which allows it
 
     def test_subagent_user_independent_of_slots_user(self):
         """subagent:user can be declared without slots:user (narrower access)."""
         slot = _make_slot(owner_app="", origin=SlotOrigin.USER, key="chat-1")
         state = _make_state({"chat-1": slot})
-        assert ws_event_allowed(
-            "subagent_done", {"slot": "chat-1"},
-            app="mochi-pet", allowed_events=_allowed("subagent:user"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "subagent_done",
+                {"slot": "chat-1"},
+                app="mochi-pet",
+                allowed_events=_allowed("subagent:user"),
+                state=state,
+            )
+            is True
+        )
         # But chat content is still blocked (no slots:user)
-        assert ws_event_allowed(
-            "chat_chunk", {"slot": "chat-1"},
-            app="mochi-pet", allowed_events=_allowed("subagent:user"), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "chat_chunk",
+                {"slot": "chat-1"},
+                app="mochi-pet",
+                allowed_events=_allowed("subagent:user"),
+                state=state,
+            )
+            is False
+        )
 
     def test_subagent_all_covers_any_app_slot(self):
         slot = _make_slot(owner_app="other-app", origin=SlotOrigin.APP, key="other")
         state = _make_state({"other": slot})
-        assert ws_event_allowed(
-            "subagent_spawn", {"slot": "other"},
-            app="mochi-pet", allowed_events=_allowed("subagent:all"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "subagent_spawn",
+                {"slot": "other"},
+                app="mochi-pet",
+                allowed_events=_allowed("subagent:all"),
+                state=state,
+            )
+            is True
+        )
 
 
 # ---------------------------------------------------------------------------
 # Tier 2: global events
 # ---------------------------------------------------------------------------
+
 
 class TestGlobalEvents:
     def test_notification_own_app_requires_declaration(self):
@@ -369,55 +506,103 @@ class TestGlobalEvents:
         # declaration (deny-by-default per CWE-269).  Undeclared apps get
         # denied even for their own notifications.
         state = _make_state()
-        assert ws_event_allowed(
-            "notification", {"source": "app:mochi-pet", "message": "hello"},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "notification",
+                {"source": "app:mochi-pet", "message": "hello"},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is False
+        )
 
     def test_notification_own_app_allowed_when_declared(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "notification", {"source": "app:mochi-pet", "message": "hello"},
-            app="mochi-pet", allowed_events=_allowed("notification"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "notification",
+                {"source": "app:mochi-pet", "message": "hello"},
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is True
+        )
 
     def test_notification_other_app_denied_without_declaration(self):
         # ``notification`` (without ``:all``) grants only own-app notifications;
         # a foreign app's push must be denied.
         state = _make_state()
-        assert ws_event_allowed(
-            "notification", {"source": "app:other-app"},
-            app="mochi-pet", allowed_events=_allowed("notification"), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "notification",
+                {"source": "app:other-app"},
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is False
+        )
 
     def test_notification_all_covers_any_source(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "notification", {"source": "app:other-app"},
-            app="mochi-pet", allowed_events=_allowed("notification:all"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "notification",
+                {"source": "app:other-app"},
+                app="mochi-pet",
+                allowed_events=_allowed("notification:all"),
+                state=state,
+            )
+            is True
+        )
 
     def test_sessions_restarting_requires_declaration(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "sessions_restarting", {"status": "restarting"},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "sessions_restarting", {"status": "restarting"},
-            app="mochi-pet", allowed_events=_allowed("sessions"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "sessions_restarting",
+                {"status": "restarting"},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "sessions_restarting",
+                {"status": "restarting"},
+                app="mochi-pet",
+                allowed_events=_allowed("sessions"),
+                state=state,
+            )
+            is True
+        )
 
     def test_log_requires_declaration(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "log", {"line": "some log"},
-            app="mochi-pet", allowed_events=_allowed("sessions"), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "log", {"line": "some log"},
-            app="mochi-pet", allowed_events=_allowed("log"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "log",
+                {"line": "some log"},
+                app="mochi-pet",
+                allowed_events=_allowed("sessions"),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "log",
+                {"line": "some log"},
+                app="mochi-pet",
+                allowed_events=_allowed("log"),
+                state=state,
+            )
+            is True
+        )
 
     def test_system_notifications_need_their_own_declaration(self):
         """Gateway-internal pushes are user content, not the app's own.
@@ -429,45 +614,87 @@ class TestGlobalEvents:
         """
         state = _make_state()
         system_note = {"text": "cron finished", "source": "system"}
-        assert ws_event_allowed(
-            "notification", system_note,
-            app="mochi-pet", allowed_events=_allowed("notification"), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "notification", system_note,
-            app="mochi-pet", allowed_events=_allowed("notification:system"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "notification",
+                system_note,
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "notification",
+                system_note,
+                app="mochi-pet",
+                allowed_events=_allowed("notification:system"),
+                state=state,
+            )
+            is True
+        )
         # A note with NO source is not attributable, so it is not the system
         # stream either -- it is denied. Accepting "" as system is exactly the
         # defect that let one app's push reach every `notification:system`
         # holder: the gate read a key no emitter writes, so it saw "" for every
         # note. Only `notification:all` crosses this.
         unattributed = {"text": "hi"}
-        assert ws_event_allowed(
-            "notification", unattributed,
-            app="mochi-pet", allowed_events=_allowed("notification"), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "notification", unattributed,
-            app="mochi-pet", allowed_events=_allowed("notification:system"), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "notification", unattributed,
-            app="mochi-pet", allowed_events=_allowed("notification:all"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "notification",
+                unattributed,
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "notification",
+                unattributed,
+                app="mochi-pet",
+                allowed_events=_allowed("notification:system"),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "notification",
+                unattributed,
+                app="mochi-pet",
+                allowed_events=_allowed("notification:all"),
+                state=state,
+            )
+            is True
+        )
 
     def test_own_app_notification_still_needs_only_notification(self):
         state = _make_state()
         own = {"text": "done", "source": "app:mochi-pet"}
-        assert ws_event_allowed(
-            "notification", own,
-            app="mochi-pet", allowed_events=_allowed("notification"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "notification",
+                own,
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is True
+        )
         # notification:system does NOT imply own-app notifications.
-        assert ws_event_allowed(
-            "notification", own,
-            app="mochi-pet", allowed_events=_allowed("notification:system"), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "notification",
+                own,
+                app="mochi-pet",
+                allowed_events=_allowed("notification:system"),
+                state=state,
+            )
+            is False
+        )
 
     def test_channel_settings_is_gated_by_owner_not_by_note_source(self):
         """It is not in _SOURCE_FILTERED_EVENTS (it carries no `source` field) but
@@ -476,23 +703,40 @@ class TestGlobalEvents:
 
         assert "notification_channel_settings" not in _SOURCE_FILTERED_EVENTS
         state = _make_state()
-        assert ws_event_allowed(
-            "notification_channel_settings",
-            {"channel": "mochi-pet.alerts", "settings": {"muted": True}},
-            app="mochi-pet", allowed_events=_allowed("notification"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "notification_channel_settings",
+                {"channel": "mochi-pet.alerts", "settings": {"muted": True}},
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is True
+        )
 
     def test_artifact_update_requires_artifacts_declaration(self):
         state = _make_state()
         payload = {"slug": "my-doc", "version": 3, "deleted": False}
-        assert ws_event_allowed(
-            "artifact_update", payload,
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "artifact_update", payload,
-            app="mochi-pet", allowed_events=_allowed("artifacts"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "artifact_update",
+                payload,
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "artifact_update",
+                payload,
+                app="mochi-pet",
+                allowed_events=_allowed("artifacts"),
+                state=state,
+            )
+            is True
+        )
 
     def test_workflow_run_event_declared_by_its_own_name(self):
         """The workflows app declares the literal event name, not a scope alias.
@@ -503,15 +747,26 @@ class TestGlobalEvents:
         """
         state = _make_state()
         payload = {"run_id": "r1", "session_key": "dashboard:chat-1"}
-        assert ws_event_allowed(
-            "workflow_run_event", payload,
-            app="workflows", allowed_events=_allowed(), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "workflow_run_event", payload,
-            app="workflows",
-            allowed_events=_allowed("workflow_run_event"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "workflow_run_event",
+                payload,
+                app="workflows",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "workflow_run_event",
+                payload,
+                app="workflows",
+                allowed_events=_allowed("workflow_run_event"),
+                state=state,
+            )
+            is True
+        )
 
     def test_notification_channel_settings_is_scoped_by_channel_owner(self):
         """A channel is `<app>.<id>` or `system.<kind>`, so it IS attributable.
@@ -524,33 +779,69 @@ class TestGlobalEvents:
         state = _make_state()
         own = {"channel": "mochi-pet.alerts", "settings": {"muted": True}}
         foreign = {"channel": "workflows.alerts", "settings": {"muted": True}}
-        assert ws_event_allowed(
-            "notification_channel_settings", own,
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "notification_channel_settings", own,
-            app="mochi-pet", allowed_events=_allowed("notification"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "notification_channel_settings",
+                own,
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "notification_channel_settings",
+                own,
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is True
+        )
         # Another app's channel is NOT covered by own-only notification.
-        assert ws_event_allowed(
-            "notification_channel_settings", foreign,
-            app="mochi-pet", allowed_events=_allowed("notification"), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "notification_channel_settings", foreign,
-            app="mochi-pet", allowed_events=_allowed("notification:all"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "notification_channel_settings",
+                foreign,
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "notification_channel_settings",
+                foreign,
+                app="mochi-pet",
+                allowed_events=_allowed("notification:all"),
+                state=state,
+            )
+            is True
+        )
         # System channels ride the system opt-in, like the system stream itself.
         system = {"channel": "system.cron", "settings": {"muted": True}}
-        assert ws_event_allowed(
-            "notification_channel_settings", system,
-            app="mochi-pet", allowed_events=_allowed("notification"), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "notification_channel_settings", system,
-            app="mochi-pet", allowed_events=_allowed("notification:system"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "notification_channel_settings",
+                system,
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "notification_channel_settings",
+                system,
+                app="mochi-pet",
+                allowed_events=_allowed("notification:system"),
+                state=state,
+            )
+            is True
+        )
 
     def test_channel_owner_helper_matches_the_handler_convention(self):
         """Pin the helper against the derivation messaging.py already uses."""
@@ -560,30 +851,49 @@ class TestGlobalEvents:
             assert notification_channel_owner(channel) == channel.split(".", 1)[0]
         # No dot -> no owner -> not attributable.
         assert notification_channel_owner("#team") == ""
-        assert notification_channel_owner("") == ''
+        assert notification_channel_owner("") == ""
 
     def test_unknown_event_denied(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "some_unknown_event_xyz", {},
-            app="mochi-pet", allowed_events=_allowed("slots:all"), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "some_unknown_event_xyz",
+                {},
+                app="mochi-pet",
+                allowed_events=_allowed("slots:all"),
+                state=state,
+            )
+            is False
+        )
 
     def test_yolo_expired_requires_declaration(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "yolo_expired", {"source": "timer"},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "yolo_expired", {"source": "timer"},
-            app="mochi-pet", allowed_events=_allowed("yolo"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "yolo_expired",
+                {"source": "timer"},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "yolo_expired",
+                {"source": "timer"},
+                app="mochi-pet",
+                allowed_events=_allowed("yolo"),
+                state=state,
+            )
+            is True
+        )
 
 
 # ---------------------------------------------------------------------------
 # filter_slots_for_app
 # ---------------------------------------------------------------------------
+
 
 class TestFilterSlotsForApp:
     def _slot_dict(self, key: str) -> dict:
@@ -594,7 +904,9 @@ class TestFilterSlotsForApp:
         state = _make_state({"mochi-pet": slot})
         result = filter_slots_for_app(
             [self._slot_dict("mochi-pet")],
-            "mochi-pet", _allowed(), state,
+            "mochi-pet",
+            _allowed(),
+            state,
         )
         assert len(result) == 1
         assert result[0]["key"] == "mochi-pet"
@@ -604,7 +916,9 @@ class TestFilterSlotsForApp:
         state = _make_state({"other-app": slot})
         result = filter_slots_for_app(
             [self._slot_dict("other-app")],
-            "mochi-pet", _allowed(), state,
+            "mochi-pet",
+            _allowed(),
+            state,
         )
         assert result == []
 
@@ -613,7 +927,9 @@ class TestFilterSlotsForApp:
         state = _make_state({"chat-1": slot})
         result = filter_slots_for_app(
             [self._slot_dict("chat-1")],
-            "mochi-pet", _allowed("slots:user"), state,
+            "mochi-pet",
+            _allowed("slots:user"),
+            state,
         )
         assert len(result) == 1
 
@@ -622,7 +938,9 @@ class TestFilterSlotsForApp:
         state = _make_state({"chat-1": slot})
         result = filter_slots_for_app(
             [self._slot_dict("chat-1")],
-            "mochi-pet", _allowed("notification"), state,
+            "mochi-pet",
+            _allowed("notification"),
+            state,
         )
         assert result == []
 
@@ -630,14 +948,18 @@ class TestFilterSlotsForApp:
         slot1 = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="mochi-pet")
         slot2 = _make_slot(owner_app="other-app", origin=SlotOrigin.APP, key="other-app")
         slot3 = _make_slot(owner_app="", origin=SlotOrigin.USER, key="chat-1")
-        state = _make_state({
-            "mochi-pet": slot1,
-            "other-app": slot2,
-            "chat-1": slot3,
-        })
+        state = _make_state(
+            {
+                "mochi-pet": slot1,
+                "other-app": slot2,
+                "chat-1": slot3,
+            }
+        )
         result = filter_slots_for_app(
             [self._slot_dict(k) for k in ["mochi-pet", "other-app", "chat-1"]],
-            "mochi-pet", _allowed("slots:all"), state,
+            "mochi-pet",
+            _allowed("slots:all"),
+            state,
         )
         assert len(result) == 3
 
@@ -646,7 +968,9 @@ class TestFilterSlotsForApp:
         state = _make_state({})
         result = filter_slots_for_app(
             [self._slot_dict("ghost")],
-            "mochi-pet", _allowed("slots:all"), state,
+            "mochi-pet",
+            _allowed("slots:all"),
+            state,
         )
         assert result == []
 
@@ -654,6 +978,7 @@ class TestFilterSlotsForApp:
 # ---------------------------------------------------------------------------
 # token_auth: implicit allow for /api/ws and /api/status
 # ---------------------------------------------------------------------------
+
 
 class TestImplicitAllow:
     def test_api_ws_implicitly_allowed_for_any_app(self):
@@ -692,6 +1017,7 @@ class TestImplicitAllow:
 # Regression: test_app_token_path_allowed_implicit_ws (from original CR)
 # ---------------------------------------------------------------------------
 
+
 def test_app_token_path_allowed_implicit_ws() -> None:
     """``/api/ws`` is implicitly allowed for all app tokens without an explicit
     permissions.api declaration: every app that uses KiroCrewClient needs it to
@@ -713,6 +1039,7 @@ def test_app_token_path_allowed_implicit_ws() -> None:
 # Empty-app fail-closed (deny-by-default, CWE-269)
 # ---------------------------------------------------------------------------
 
+
 class TestEmptyAppDeniedClosed:
     """``ws_event_allowed`` must fail-closed if called with an empty app.
 
@@ -723,28 +1050,45 @@ class TestEmptyAppDeniedClosed:
     def test_empty_app_denied_for_tier0_event(self):
         # Even the ``dashboard`` Tier-0 event must be denied when app is empty.
         state = _make_state()
-        assert ws_event_allowed(
-            "dashboard", {},
-            app="", allowed_events=_allowed("dashboard"), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "dashboard",
+                {},
+                app="",
+                allowed_events=_allowed("dashboard"),
+                state=state,
+            )
+            is False
+        )
 
     def test_empty_app_denied_for_owned_slot(self):
         slot = _make_slot(owner_app="", origin=SlotOrigin.USER, key="s1")
         state = _make_state({"s1": slot})
-        assert ws_event_allowed(
-            "chat_chunk", {"slot": "s1"},
-            app="", allowed_events=_allowed("slots:user"), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "chat_chunk",
+                {"slot": "s1"},
+                app="",
+                allowed_events=_allowed("slots:user"),
+                state=state,
+            )
+            is False
+        )
 
     def test_empty_app_deny_emits_audit(self):
         # A caller that reaches ws_event_allowed with an empty app must
         # leave an audit trail so the bypass is observable.
         from kiro_crew.dashboard import ws_event_scope as _wes
+
         state = _make_state()
         with patch("kiro_crew.sel.sel") as sel_mock:
             _wes._sel_last_audit.clear()  # fresh window
             ws_event_allowed(
-                "chat_chunk", {}, app="", allowed_events=_allowed(), state=state,
+                "chat_chunk",
+                {},
+                app="",
+                allowed_events=_allowed(),
+                state=state,
             )
             outcomes = [
                 c.kwargs.get("outcome", "")
@@ -757,6 +1101,7 @@ class TestEmptyAppDeniedClosed:
 # ``slot_title`` uses ``key`` (not ``slot``) for the slot identifier
 # ---------------------------------------------------------------------------
 
+
 class TestSlotTitleKeyField:
     """Regression: ``slot_title`` events must be filtered by the ``key`` field.
 
@@ -768,23 +1113,36 @@ class TestSlotTitleKeyField:
     def test_slot_title_own_slot_allowed_via_key(self):
         slot = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="s1")
         state = _make_state({"s1": slot})
-        assert ws_event_allowed(
-            "slot_title", {"key": "s1", "title": "hi"},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "slot_title",
+                {"key": "s1", "title": "hi"},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is True
+        )
 
     def test_slot_title_other_app_denied(self):
         slot = _make_slot(owner_app="other", origin=SlotOrigin.APP, key="s1")
         state = _make_state({"s1": slot})
-        assert ws_event_allowed(
-            "slot_title", {"key": "s1", "title": "hi"},
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "slot_title",
+                {"key": "s1", "title": "hi"},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
 # ``slots`` full re-push: needs any ``slots:*`` scope
 # ---------------------------------------------------------------------------
+
 
 class TestSlotsListEvent:
     """``slots`` events are always delivered — payload-level per-app filter
@@ -798,33 +1156,53 @@ class TestSlotsListEvent:
         # No explicit slots:* declaration — event still delivered; the
         # payload filter in _serialize_for_client will trim to own slots.
         state = _make_state()
-        assert ws_event_allowed(
-            "slots", [],
-            app="mochi-pet", allowed_events=_allowed(), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "slots",
+                [],
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
+            )
+            is True
+        )
 
     def test_slots_allowed_with_slots_own(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "slots", [],
-            app="mochi-pet", allowed_events=_allowed("slots:own"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "slots",
+                [],
+                app="mochi-pet",
+                allowed_events=_allowed("slots:own"),
+                state=state,
+            )
+            is True
+        )
 
     def test_slots_allowed_with_slots_all(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "slots", [],
-            app="mochi-pet", allowed_events=_allowed("slots:all"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "slots",
+                [],
+                app="mochi-pet",
+                allowed_events=_allowed("slots:all"),
+                state=state,
+            )
+            is True
+        )
 
 
 # ---------------------------------------------------------------------------
 # SEL audit deduplication (first-per-window, not per-call)
 # ---------------------------------------------------------------------------
 
+
 class TestAuditDedup:
     def _clear_cache(self):
         from kiro_crew.dashboard import ws_event_scope
+
         ws_event_scope._sel_last_audit.clear()
 
     def test_first_deny_audited_subsequent_within_window_suppressed(self):
@@ -833,7 +1211,8 @@ class TestAuditDedup:
         with patch("kiro_crew.sel.sel") as m:
             for _ in range(5):
                 ws_event_allowed(
-                    "notification", {"source": "app:other-app"},
+                    "notification",
+                    {"source": "app:other-app"},
                     app="mochi-pet",
                     allowed_events=_allowed("notification"),
                     state=state,
@@ -847,15 +1226,19 @@ class TestAuditDedup:
         with patch("kiro_crew.sel.sel") as m:
             # notification_scope_denied
             ws_event_allowed(
-                "notification", {"source": "app:other-app"},
+                "notification",
+                {"source": "app:other-app"},
                 app="mochi-pet",
                 allowed_events=_allowed("notification"),
                 state=state,
             )
             # unknown_event (different reason)
             ws_event_allowed(
-                "totally_made_up_event", {},
-                app="mochi-pet", allowed_events=_allowed(), state=state,
+                "totally_made_up_event",
+                {},
+                app="mochi-pet",
+                allowed_events=_allowed(),
+                state=state,
             )
             assert m.return_value.log_api_access.call_count == 2
 
@@ -863,6 +1246,7 @@ class TestAuditDedup:
 # ---------------------------------------------------------------------------
 # Positive ``_is_dashboard_user`` flag on _send_ws_all / subagent subscribers
 # ---------------------------------------------------------------------------
+
 
 class TestPositiveDashboardUserFlag:
     """The scope gate must be triggered by the ABSENCE of a positive
@@ -898,6 +1282,7 @@ class TestPositiveDashboardUserFlag:
 
     def test_dashboard_user_positive_flag_bypasses_gate(self):
         from kiro_crew.dashboard.state import DashboardState
+
         state = MagicMock(spec=DashboardState)
         state._slots = {}
         state._ws_client_allowed = DashboardState._ws_client_allowed.__get__(state)
@@ -913,6 +1298,7 @@ class TestScopeCheckExceptionAudited:
     def test_scope_check_exception_emits_audit(self):
         from kiro_crew.dashboard import ws_event_scope
         from kiro_crew.dashboard.state import DashboardState
+
         ws_event_scope._sel_last_audit.clear()
         state = MagicMock(spec=DashboardState)
         state._slots = {}
@@ -925,10 +1311,13 @@ class TestScopeCheckExceptionAudited:
             "_allowed_events": _allowed(),
         }.get(k, default)
         # Force ws_event_allowed to raise
-        with patch(
-            "kiro_crew.dashboard.ws_event_scope.ws_event_allowed",
-            side_effect=RuntimeError("boom"),
-        ), patch("kiro_crew.sel.sel") as sel_mock:
+        with (
+            patch(
+                "kiro_crew.dashboard.ws_event_scope.ws_event_allowed",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch("kiro_crew.sel.sel") as sel_mock,
+        ):
             result = state._ws_client_allowed(ws, "chat_chunk", {"slot": "x"})
             assert result is False
             # The audit was invoked at least once with the scope_check_exception reason.
@@ -941,6 +1330,7 @@ class TestScopeCheckExceptionAudited:
 # _origin persistence — cron/system slots must survive a restart with the
 # correct origin so the WS scope gate doesn't mis-classify them.
 # ---------------------------------------------------------------------------
+
 
 class TestOriginPersistence:
     """A cron- or system-initiated slot rehydrated from disk must keep its
@@ -1089,8 +1479,11 @@ class TestOriginPersistence:
         assert restored is not None
 
         assert not ws_event_allowed(
-            "chat_message", {"slot": "cron-1"},
-            app="some-app", allowed_events=frozenset({"slots:user"}), state=state,
+            "chat_message",
+            {"slot": "cron-1"},
+            app="some-app",
+            allowed_events=frozenset({"slots:user"}),
+            state=state,
         )
 
 
@@ -1098,6 +1491,7 @@ class TestOriginPersistence:
 # Positive is_dashboard_user flag from token_auth — a token that does not
 # come through the auth middleware (or fails it) MUST NOT bypass the gate.
 # ---------------------------------------------------------------------------
+
 
 class TestAuthMiddlewareIsDashboardUser:
     """The auth middleware sets ``request["is_dashboard_user"]`` positively
@@ -1109,6 +1503,7 @@ class TestAuthMiddlewareIsDashboardUser:
         # Behavioral: a ws with positive _is_dashboard_user flag must bypass
         # the scope gate entirely (that's the CWE-269 fix's whole point).
         from kiro_crew.dashboard.state import DashboardState
+
         state = MagicMock(spec=DashboardState)
         state._slots = {}
         state._ws_client_allowed = DashboardState._ws_client_allowed.__get__(state)
@@ -1124,6 +1519,7 @@ class TestAuthMiddlewareIsDashboardUser:
     def test_missing_flag_treats_as_app_token(self):
         # Behavioral: without the positive flag, gate applies (deny-by-default).
         from kiro_crew.dashboard.state import DashboardState
+
         state = MagicMock(spec=DashboardState)
         state._slots = {}
         state._ws_client_allowed = DashboardState._ws_client_allowed.__get__(state)
@@ -1142,6 +1538,7 @@ class TestAuthMiddlewareIsDashboardUser:
 # treated as USER by default.
 # ---------------------------------------------------------------------------
 
+
 class TestMissingOriginFailsClosed:
     """CWE-269 defense-in-depth: if ``_origin`` is somehow missing (pre-
     migration slot, race, bug), it must remain invisible to any ``:user``
@@ -1159,22 +1556,30 @@ class TestMissingOriginFailsClosed:
         slot = self._slot_without_origin()
         state = _make_state({"s1": slot})
         # slots:user must NOT grant visibility to a slot with no _origin.
-        assert ws_event_allowed(
-            "chat_chunk", {"slot": "s1"},
-            app="mochi-pet",
-            allowed_events=_allowed("slots:user"),
-            state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "chat_chunk",
+                {"slot": "s1"},
+                app="mochi-pet",
+                allowed_events=_allowed("slots:user"),
+                state=state,
+            )
+            is False
+        )
 
     def test_subagent_visible_denied_when_origin_missing(self):
         slot = self._slot_without_origin()
         state = _make_state({"s1": slot})
-        assert ws_event_allowed(
-            "subagent_chunk", {"slot": "s1"},
-            app="mochi-pet",
-            allowed_events=_allowed("subagent:user"),
-            state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "subagent_chunk",
+                {"slot": "s1"},
+                app="mochi-pet",
+                allowed_events=_allowed("subagent:user"),
+                state=state,
+            )
+            is False
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1185,6 +1590,7 @@ class TestMissingOriginFailsClosed:
 # reading the module source to guard against regression (constructing a real
 # DashboardState in-process here would be over-engineered).
 # ---------------------------------------------------------------------------
+
 
 class TestSlotsRepushFilter:
     """Behavioral: an app that declared slots:own must NOT receive other
@@ -1197,11 +1603,10 @@ class TestSlotsRepushFilter:
         # required surface.  We bind the real method to a MagicMock so it
         # runs against our slot map instead of a live DashboardState.
         from kiro_crew.dashboard.state import DashboardState
+
         state = MagicMock(spec=DashboardState)
         state._slots = slot_map
-        state._serialize_for_client = (
-            DashboardState._serialize_for_client.__get__(state)
-        )
+        state._serialize_for_client = DashboardState._serialize_for_client.__get__(state)
         return state
 
     def _ws(self, *, is_dashboard: bool, app: str = "", events=frozenset()):
@@ -1216,18 +1621,22 @@ class TestSlotsRepushFilter:
 
     def test_dashboard_user_receives_full_slots_list(self):
         import json
+
         slot_a = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="a")
         slot_b = _make_slot(owner_app="other", origin=SlotOrigin.APP, key="b")
         state = self._make_state_with_slots({"a": slot_a, "b": slot_b})
         ws = self._ws(is_dashboard=True)
-        default_msg = json.dumps({
-            "type": "slots",
-            "data": [{"key": "a"}, {"key": "b"}],
-            "yolo": False,
-            "channelTrusted": False,
-        })
+        default_msg = json.dumps(
+            {
+                "type": "slots",
+                "data": [{"key": "a"}, {"key": "b"}],
+                "yolo": False,
+                "channelTrusted": False,
+            }
+        )
         result = state._serialize_for_client(
-            ws, "slots",
+            ws,
+            "slots",
             {"slots": [{"key": "a"}, {"key": "b"}], "yolo": False, "channelTrusted": False},
             default_msg,
         )
@@ -1236,15 +1645,18 @@ class TestSlotsRepushFilter:
 
     def test_app_with_slots_own_only_sees_own_slot(self):
         import json
+
         slot_a = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="a")
         slot_b = _make_slot(owner_app="other-app", origin=SlotOrigin.APP, key="b")
         state = self._make_state_with_slots({"a": slot_a, "b": slot_b})
         ws = self._ws(
-            is_dashboard=False, app="mochi-pet",
+            is_dashboard=False,
+            app="mochi-pet",
             events=frozenset({"slots:own"}),
         )
         result_str = state._serialize_for_client(
-            ws, "slots",
+            ws,
+            "slots",
             {
                 "slots": [{"key": "a"}, {"key": "b"}],
                 "yolo": False,
@@ -1272,9 +1684,11 @@ class TestSlotsRepushFilter:
 # `disable_app` rewrites the registry without closing sockets.
 # ---------------------------------------------------------------------------
 
+
 class TestLiveScopeNarrowing:
     def setup_method(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         mod._declared_cache.clear()
         mod._declared_refreshing.clear()
 
@@ -1283,6 +1697,7 @@ class TestLiveScopeNarrowing:
 
     def test_narrowed_manifest_takes_effect_without_a_reconnect(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         mod._declared_cache["mochi-pet"] = (time.monotonic(), True, _allowed("slots:own"))
         eff = mod.effective_allowed_events("mochi-pet", self._snapshot())
         assert "slots:all" not in eff, "a revoked scope must stop being honoured"
@@ -1291,6 +1706,7 @@ class TestLiveScopeNarrowing:
     def test_deleted_manifest_collapses_to_tier0_only(self):
         """`app disable` / uninstall leaves the socket open; scopes must go."""
         from kiro_crew.dashboard import ws_event_scope as mod
+
         mod._declared_cache["mochi-pet"] = (time.monotonic(), False, frozenset())
         assert mod.effective_allowed_events("mochi-pet", self._snapshot()) == frozenset()
         assert mod.app_events_revoked("mochi-pet") is True
@@ -1302,9 +1718,8 @@ class TestLiveScopeNarrowing:
         never authenticated for.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
-        mod._declared_cache["mochi-pet"] = (
-            time.monotonic(), True, _allowed("slots:own", "log")
-        )
+
+        mod._declared_cache["mochi-pet"] = (time.monotonic(), True, _allowed("slots:own", "log"))
         eff = mod.effective_allowed_events("mochi-pet", _allowed("slots:own"))
         assert eff == _allowed("slots:own")
         assert "log" not in eff, "a widened manifest must not reach an open socket"
@@ -1315,6 +1730,7 @@ class TestLiveScopeNarrowing:
         is itself an authenticated read, so leaning on it briefly widens nothing.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
+
         snap = self._snapshot()
         with patch.object(mod, "_schedule_declared_refresh") as sched:
             assert mod.effective_allowed_events("mochi-pet", snap) == snap
@@ -1322,6 +1738,7 @@ class TestLiveScopeNarrowing:
 
     def test_stale_entry_is_applied_and_refresh_scheduled(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         mod._declared_cache["mochi-pet"] = (
             time.monotonic() - (mod._MANIFEST_EXPOSE_TTL_SECS + 5),
             True,
@@ -1334,13 +1751,17 @@ class TestLiveScopeNarrowing:
 
     def test_never_reads_the_disk_on_the_decision_path(self):
         from kiro_crew.dashboard import ws_event_scope as mod
-        with patch.object(mod, "get_app_manifest") as gm, \
-                patch.object(mod, "_schedule_declared_refresh"):
+
+        with (
+            patch.object(mod, "get_app_manifest") as gm,
+            patch.object(mod, "_schedule_declared_refresh"),
+        ):
             mod.effective_allowed_events("mochi-pet", self._snapshot())
             gm.assert_not_called()
 
     def test_refresh_is_coalesced(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         loop = MagicMock()
         with patch.object(mod.asyncio, "get_running_loop", return_value=loop):
             for _ in range(20):
@@ -1354,25 +1775,34 @@ class TestLiveScopeNarrowing:
         unchanged, so the intersection would keep honouring them.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
+
         fake = MagicMock()
         fake.permissions.events = ["slots:all", "log"]
-        with patch.object(mod, "is_app_enabled", return_value=False), \
-                patch.object(mod, "get_app_manifest", return_value=fake):
+        with (
+            patch.object(mod, "is_app_enabled", return_value=False),
+            patch.object(mod, "get_app_manifest", return_value=fake),
+        ):
             assert mod._read_declared_events("mochi-pet") == (False, frozenset())
 
     def test_enabled_app_declares_its_manifest_events(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         fake = MagicMock()
         fake.permissions.events = ["slots:own"]
-        with patch.object(mod, "is_app_enabled", return_value=True), \
-                patch.object(mod, "get_app_manifest", return_value=fake):
+        with (
+            patch.object(mod, "is_app_enabled", return_value=True),
+            patch.object(mod, "get_app_manifest", return_value=fake),
+        ):
             assert mod._read_declared_events("mochi-pet") == (True, _allowed("slots:own"))
 
     def test_enablement_is_checked_before_the_manifest_read(self):
         """A disabled app must not even cost a manifest parse."""
         from kiro_crew.dashboard import ws_event_scope as mod
-        with patch.object(mod, "is_app_enabled", return_value=False), \
-                patch.object(mod, "get_app_manifest") as gm:
+
+        with (
+            patch.object(mod, "is_app_enabled", return_value=False),
+            patch.object(mod, "get_app_manifest") as gm,
+        ):
             mod._read_declared_events("mochi-pet")
             gm.assert_not_called()
 
@@ -1385,8 +1815,11 @@ class TestLiveScopeNarrowing:
         positive evidence from ``installed.json``.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
-        with patch.object(mod, "is_app_enabled", return_value=True), \
-                patch.object(mod, "get_app_manifest", return_value=None):
+
+        with (
+            patch.object(mod, "is_app_enabled", return_value=True),
+            patch.object(mod, "get_app_manifest", return_value=None),
+        ):
             assert mod._read_declared_events("gone") == (True, frozenset())
 
     def test_log_subscriber_send_rechecks_the_live_scope(self):
@@ -1510,22 +1943,20 @@ class TestLiveScopeNarrowing:
         reload across a gateway upgrade.
         """
         src = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "dashboard" / "ws.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "dashboard" / "ws.py"
         ).read_text(encoding="utf-8")
-        assert 'for _owner_only in ("branch", "commit")' in src, (
-            "the periodic dashboard frame must withhold checkout identity from apps"
-        )
+        assert (
+            'for _owner_only in ("branch", "commit")' in src
+        ), "the periodic dashboard frame must withhold checkout identity from apps"
         assert 'if not ws.get("_is_dashboard_user", False):' in src
         # And the owner surfaces must NOT be narrowed: /api/status and SSE run on
         # dashboard-user tokens and still need the full snapshot.
         state_src = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "dashboard" / "state.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "dashboard" / "state.py"
         ).read_text(encoding="utf-8")
-        assert "branch, commit = self._build_info" in state_src, (
-            "status_snapshot itself must keep returning branch/commit"
-        )
+        assert (
+            "branch, commit = self._build_info" in state_src
+        ), "status_snapshot itself must keep returning branch/commit"
 
     def test_source_guard_log_replay_uses_the_live_scope(self):
         """The replay half of the log path.
@@ -1537,15 +1968,15 @@ class TestLiveScopeNarrowing:
         that half was missed.
         """
         src = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "dashboard" / "ws.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "dashboard" / "ws.py"
         ).read_text(encoding="utf-8")
-        assert "effective_allowed_events(ws_app, allowed_events)" in src, (
-            "subscribe_logs must resolve the live scope before replaying the ring"
-        )
-        assert '"log" in _live or "log:all" in _live' in src, (
-            "the replay gate must test the LIVE set, not the connect snapshot"
-        )
+        assert (
+            "effective_allowed_events(ws_app, allowed_events)" in src
+        ), "subscribe_logs must resolve the live scope before replaying the ring"
+        assert (
+            '"log" in _live or "log:all" in _live' in src
+        ), "the replay gate must test the LIVE set, not the connect snapshot"
+
 
 # ---------------------------------------------------------------------------
 # Grants are audited, not just denials.
@@ -1573,17 +2004,25 @@ class TestGrantsAreAudited:
 
     def _enable(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         mod._declared_cache[self.APP] = (time.monotonic(), True, frozenset())
 
     def test_an_allowed_event_is_audited_as_granted(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         self._enable()
         state = self._state_with_own_slot()
         with patch.object(mod, "_audit_decision") as audit:
-            assert ws_event_allowed(
-                "chat_delta", {"slot": "s1"},
-                app=self.APP, allowed_events=frozenset(), state=state,
-            ) is True
+            assert (
+                ws_event_allowed(
+                    "chat_delta",
+                    {"slot": "s1"},
+                    app=self.APP,
+                    allowed_events=frozenset(),
+                    state=state,
+                )
+                is True
+            )
         audit.assert_called_once()
         assert audit.call_args.args[2] == "granted", "outcome must read as a grant"
 
@@ -1596,21 +2035,29 @@ class TestGrantsAreAudited:
         forgotten would show up here.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
+
         self._enable()
         state = self._state_with_own_slot()
         batch = sorted(mod._SUBAGENT_BATCH_EVENTS)[0]
         cases = [
-            (sorted(mod._TIER0_ALWAYS)[0], {}, frozenset()),          # Tier 0
-            ("slots", {}, frozenset()),                                # admitted whole
-            (batch, {}, frozenset()),                                  # admitted whole
-            ("chat_delta", {"slot": "s1"}, frozenset()),               # own slot
-            ("log", {}, _allowed("log")),                              # global, declared
+            (sorted(mod._TIER0_ALWAYS)[0], {}, frozenset()),  # Tier 0
+            ("slots", {}, frozenset()),  # admitted whole
+            (batch, {}, frozenset()),  # admitted whole
+            ("chat_delta", {"slot": "s1"}, frozenset()),  # own slot
+            ("log", {}, _allowed("log")),  # global, declared
         ]
         for event, payload, scopes in cases:
             with patch.object(mod, "_audit_decision") as audit:
-                assert ws_event_allowed(
-                    event, payload, app=self.APP, allowed_events=scopes, state=state,
-                ) is True, f"{event} should be allowed in this setup"
+                assert (
+                    ws_event_allowed(
+                        event,
+                        payload,
+                        app=self.APP,
+                        allowed_events=scopes,
+                        state=state,
+                    )
+                    is True
+                ), f"{event} should be allowed in this setup"
             assert audit.call_count == 1, f"{event} was allowed without an audit record"
 
     def test_repeated_grants_are_deduplicated(self):
@@ -1622,8 +2069,11 @@ class TestGrantsAreAudited:
         with patch("kiro_crew.sel.sel") as sel_factory:
             for _ in range(5):
                 ws_event_allowed(
-                    "chat_delta", {"slot": "s1"},
-                    app=self.APP, allowed_events=frozenset(), state=state,
+                    "chat_delta",
+                    {"slot": "s1"},
+                    app=self.APP,
+                    allowed_events=frozenset(),
+                    state=state,
                 )
             calls = sel_factory.return_value.log_api_access.call_count
         assert calls == 1, (
@@ -1648,12 +2098,18 @@ class TestGrantsAreAudited:
 
         with patch("kiro_crew.sel.sel") as sel_factory:
             ws_event_allowed(
-                "chat_delta", {"slot": "s1"},
-                app=self.APP, allowed_events=frozenset(), state=state,
+                "chat_delta",
+                {"slot": "s1"},
+                app=self.APP,
+                allowed_events=frozenset(),
+                state=state,
             )
             ws_event_allowed(
-                "chat_delta", {"slot": "s2"},
-                app=self.APP, allowed_events=frozenset(), state=state,
+                "chat_delta",
+                {"slot": "s2"},
+                app=self.APP,
+                allowed_events=frozenset(),
+                state=state,
             )
             outcomes = [
                 c.kwargs.get("outcome")
@@ -1678,15 +2134,18 @@ class TestGrantsAreAudited:
 # through `ws_event_allowed`, so each is asserted separately here.
 # ---------------------------------------------------------------------------
 
+
 class TestDisabledAppLosesTheOwnSlotDefault:
     APP = "mochi-pet"
 
     def _revoke(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         mod._declared_cache[self.APP] = (time.monotonic(), False, frozenset())
 
     def _enable(self, events: frozenset[str] = frozenset()):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         mod._declared_cache[self.APP] = (time.monotonic(), True, events)
 
     def _own_slot_state(self):
@@ -1705,16 +2164,28 @@ class TestDisabledAppLosesTheOwnSlotDefault:
         """
         state = self._own_slot_state()
         self._enable()
-        assert ws_event_allowed(
-            "chat_delta", {"slot": "s1"},
-            app=self.APP, allowed_events=frozenset(), state=state,
-        ) is True, "an ENABLED app sees its own slot by documented default"
+        assert (
+            ws_event_allowed(
+                "chat_delta",
+                {"slot": "s1"},
+                app=self.APP,
+                allowed_events=frozenset(),
+                state=state,
+            )
+            is True
+        ), "an ENABLED app sees its own slot by documented default"
 
         self._revoke()
-        assert ws_event_allowed(
-            "chat_delta", {"slot": "s1"},
-            app=self.APP, allowed_events=frozenset(), state=state,
-        ) is False, "a disabled app must not keep receiving its own chat"
+        assert (
+            ws_event_allowed(
+                "chat_delta",
+                {"slot": "s1"},
+                app=self.APP,
+                allowed_events=frozenset(),
+                state=state,
+            )
+            is False
+        ), "a disabled app must not keep receiving its own chat"
 
     def test_gate_denies_the_always_admitted_envelopes_when_disabled(self):
         """What the gate-level revocation check uniquely buys.
@@ -1727,24 +2198,40 @@ class TestDisabledAppLosesTheOwnSlotDefault:
         "revocation collapses the socket to Tier 0" literally true.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
+
         state = self._own_slot_state()
         batch = sorted(mod._SUBAGENT_BATCH_EVENTS)[0]
 
         self._enable()
         for etype in ("slots", batch):
-            assert ws_event_allowed(
-                etype, {}, app=self.APP, allowed_events=frozenset(), state=state,
-            ) is True, f"{etype} is admitted whole for an enabled app"
+            assert (
+                ws_event_allowed(
+                    etype,
+                    {},
+                    app=self.APP,
+                    allowed_events=frozenset(),
+                    state=state,
+                )
+                is True
+            ), f"{etype} is admitted whole for an enabled app"
 
         self._revoke()
         for etype in ("slots", batch):
-            assert ws_event_allowed(
-                etype, {}, app=self.APP, allowed_events=frozenset(), state=state,
-            ) is False, f"{etype} must not be admitted for a revoked app"
+            assert (
+                ws_event_allowed(
+                    etype,
+                    {},
+                    app=self.APP,
+                    allowed_events=frozenset(),
+                    state=state,
+                )
+                is False
+            ), f"{etype} must not be admitted for a revoked app"
 
     def test_slots_repush_filter_drops_own_slot_when_disabled(self):
         """Entry point 2: ``filter_slots_for_app`` never calls the gate."""
         from kiro_crew.dashboard.ws_event_scope import filter_slots_for_app
+
         state = self._own_slot_state()
         rows = [{"key": "s1"}]
 
@@ -1760,6 +2247,7 @@ class TestDisabledAppLosesTheOwnSlotDefault:
     def test_subagent_batch_filter_drops_own_items_when_disabled(self):
         """Entry point 3: ``filter_subagent_batch_for_app`` never calls the gate."""
         from kiro_crew.dashboard.ws_event_scope import filter_subagent_batch_for_app
+
         state = self._own_slot_state()
         items = [{"slot": "s1", "id": "a"}]
 
@@ -1776,6 +2264,7 @@ class TestDisabledAppLosesTheOwnSlotDefault:
         decision in this module does.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
+
         self._enable()
         own = _make_slot(owner_app=self.APP, origin=SlotOrigin.APP, key="s1")
         foreign = _make_slot(owner_app="other-app", origin=SlotOrigin.APP, key="s2")
@@ -1788,12 +2277,13 @@ class TestDisabledAppLosesTheOwnSlotDefault:
         assert [r["key"] for r in result] == ["s1"]
         outcomes = [c.args[2] for c in audit.call_args_list]
         assert "granted" in outcomes, "the visible own slot must be audited as a grant"
-        assert any(o.startswith("denied:") for o in outcomes), (
-            "the foreign slot must be audited as a denial"
-        )
+        assert any(
+            o.startswith("denied:") for o in outcomes
+        ), "the foreign slot must be audited as a denial"
 
     def test_subagent_batch_filter_audits_each_item_decision(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         self._enable()
         own = _make_slot(owner_app=self.APP, origin=SlotOrigin.APP, key="s1")
         foreign = _make_slot(owner_app="other-app", origin=SlotOrigin.APP, key="s2")
@@ -1817,10 +2307,18 @@ class TestDisabledAppLosesTheOwnSlotDefault:
         self._revoke()
         state = self._own_slot_state()
         from kiro_crew.dashboard import ws_event_scope as mod
+
         tier0 = sorted(mod._TIER0_ALWAYS)[0]
-        assert ws_event_allowed(
-            tier0, {}, app=self.APP, allowed_events=frozenset(), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                tier0,
+                {},
+                app=self.APP,
+                allowed_events=frozenset(),
+                state=state,
+            )
+            is True
+        )
 
     def test_cold_miss_does_not_revoke(self):
         """An unknown app must not read as revoked.
@@ -1832,6 +2330,7 @@ class TestDisabledAppLosesTheOwnSlotDefault:
         ``test_connect_load_primes_the_cache_so_the_first_frame_is_authoritative``.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
+
         with patch.object(mod, "_schedule_declared_refresh") as sched:
             assert mod.app_events_revoked("never-seen") is False
             sched.assert_called_once_with("never-seen")
@@ -1844,11 +2343,14 @@ class TestDisabledAppLosesTheOwnSlotDefault:
         both of which run before any background refresh.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
+
         fake = MagicMock()
         fake.permissions.events = ["slots:all"]
 
-        with patch.object(mod, "is_app_enabled", return_value=False), \
-                patch.object(mod, "get_app_manifest", return_value=fake):
+        with (
+            patch.object(mod, "is_app_enabled", return_value=False),
+            patch.object(mod, "get_app_manifest", return_value=fake),
+        ):
             enabled, events = mod.load_declared_events_for_connect(self.APP)
 
         assert enabled is False, "the caller needs the flag to refuse the socket"
@@ -1860,10 +2362,13 @@ class TestDisabledAppLosesTheOwnSlotDefault:
 
     def test_connect_load_reports_an_enabled_app_and_its_scopes(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         fake = MagicMock()
         fake.permissions.events = ["slots:own", "log"]
-        with patch.object(mod, "is_app_enabled", return_value=True), \
-                patch.object(mod, "get_app_manifest", return_value=fake):
+        with (
+            patch.object(mod, "is_app_enabled", return_value=True),
+            patch.object(mod, "get_app_manifest", return_value=fake),
+        ):
             enabled, events = mod.load_declared_events_for_connect(self.APP)
         assert enabled is True
         assert events == _allowed("slots:own", "log")
@@ -1878,6 +2383,7 @@ class TestDisabledAppLosesTheOwnSlotDefault:
         latter still gets its own slots.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
+
         snap = _allowed("slots:own")
 
         self._enable()
@@ -1885,9 +2391,9 @@ class TestDisabledAppLosesTheOwnSlotDefault:
         self._revoke()
         revoked_scopes = mod.effective_allowed_events(self.APP, snap)
 
-        assert enabled_scopes == revoked_scopes == frozenset(), (
-            "indistinguishable by scope set -- hence app_events_revoked"
-        )
+        assert (
+            enabled_scopes == revoked_scopes == frozenset()
+        ), "indistinguishable by scope set -- hence app_events_revoked"
 
 
 # ---------------------------------------------------------------------------
@@ -1902,6 +2408,7 @@ class TestDisabledAppLosesTheOwnSlotDefault:
 # suite flags every fake socket ``_is_dashboard_user=True`` and so only exercises
 # the bypass branch.
 # ---------------------------------------------------------------------------
+
 
 class TestSendWsAllComposition:
     def _sockets_and_state(self, *, app_events: frozenset[str]):
@@ -1919,11 +2426,13 @@ class TestSendWsAllComposition:
             return ws
 
         dash = _ws({"_is_dashboard_user": True, "_app": "", "_allowed_events": frozenset()})
-        app = _ws({
-            "_is_dashboard_user": False,
-            "_app": "mochi-pet",
-            "_allowed_events": app_events,
-        })
+        app = _ws(
+            {
+                "_is_dashboard_user": False,
+                "_app": "mochi-pet",
+                "_allowed_events": app_events,
+            }
+        )
 
         state = MagicMock(spec=DashboardState)
         state._slots = {"own": own, "foreign": other, "user-slot": user}
@@ -1941,23 +2450,15 @@ class TestSendWsAllComposition:
 
     def test_foreign_slot_event_reaches_dashboard_but_not_app(self):
         """The seam's core job, asserted on the wire rather than on a bool."""
-        state, dash, app, wire = self._sockets_and_state(
-            app_events=_allowed("slots:own")
-        )
-        state._send_ws_all(
-            "chat_chunk", {"slot": "foreign"}, json.dumps({"type": "chat_chunk"})
-        )
+        state, dash, app, wire = self._sockets_and_state(app_events=_allowed("slots:own"))
+        state._send_ws_all("chat_chunk", {"slot": "foreign"}, json.dumps({"type": "chat_chunk"}))
         assert self._sent_to(wire, dash), "dashboard user must still receive it"
         assert not self._sent_to(wire, app), "app must not see a foreign slot's chunk"
 
     def test_own_slot_event_reaches_both(self):
         """Own-slot delivery needs no declaration -- the documented default."""
-        state, dash, app, wire = self._sockets_and_state(
-            app_events=_allowed("slots:own")
-        )
-        state._send_ws_all(
-            "chat_chunk", {"slot": "own"}, json.dumps({"type": "chat_chunk"})
-        )
+        state, dash, app, wire = self._sockets_and_state(app_events=_allowed("slots:own"))
+        state._send_ws_all("chat_chunk", {"slot": "own"}, json.dumps({"type": "chat_chunk"}))
         assert self._sent_to(wire, dash)
         assert self._sent_to(wire, app), "an app always sees its OWN slot's events"
 
@@ -1968,9 +2469,7 @@ class TestSendWsAllComposition:
         an app from reading every slot. Asserting the boolean would pass while
         the wire still carried the full list.
         """
-        state, dash, app, wire = self._sockets_and_state(
-            app_events=_allowed("slots:own")
-        )
+        state, dash, app, wire = self._sockets_and_state(app_events=_allowed("slots:own"))
         envelope = {
             "slots": [{"key": "own"}, {"key": "foreign"}, {"key": "user-slot"}],
             "yolo": True,
@@ -1988,9 +2487,9 @@ class TestSendWsAllComposition:
         assert "channelTrusted" not in payload
 
         dash_frames = self._sent_to(wire, dash)
-        assert dash_frames == [json.dumps({"type": "slots"})], (
-            "dashboard user gets the unmodified default message"
-        )
+        assert dash_frames == [
+            json.dumps({"type": "slots"})
+        ], "dashboard user gets the unmodified default message"
 
     def test_unknown_event_is_withheld_from_app_only(self):
         """Deny-by-default at the seam: an unclassified event never reaches an app.
@@ -1999,27 +2498,19 @@ class TestSendWsAllComposition:
         frame into the slot-visibility branch instead, where an own-slot event is
         allowed by default and the unknown-event floor is never consulted.
         """
-        state, dash, app, wire = self._sockets_and_state(
-            app_events=build_allowed_event_set(["*"])
-        )
-        state._send_ws_all(
-            "totally_new_event", {"detail": "x"}, json.dumps({"type": "x"})
-        )
+        state, dash, app, wire = self._sockets_and_state(app_events=build_allowed_event_set(["*"]))
+        state._send_ws_all("totally_new_event", {"detail": "x"}, json.dumps({"type": "x"}))
         assert self._sent_to(wire, dash)
-        assert not self._sent_to(wire, app), (
-            "even a wildcard manifest must not receive an unclassified event"
-        )
+        assert not self._sent_to(
+            wire, app
+        ), "even a wildcard manifest must not receive an unclassified event"
 
     def test_closed_socket_is_reaped_without_blocking_the_others(self):
-        state, dash, app, wire = self._sockets_and_state(
-            app_events=_allowed("slots:own")
-        )
+        state, dash, app, wire = self._sockets_and_state(app_events=_allowed("slots:own"))
         dash.closed = True
         removed: list[MagicMock] = []
         state._remove_ws = removed.append
-        state._send_ws_all(
-            "chat_chunk", {"slot": "own"}, json.dumps({"type": "chat_chunk"})
-        )
+        state._send_ws_all("chat_chunk", {"slot": "own"}, json.dumps({"type": "chat_chunk"}))
         assert removed == [dash]
         assert self._sent_to(wire, app), "a dead peer must not stop live delivery"
 
@@ -2031,15 +2522,15 @@ class TestSendWsAllComposition:
 # blanket-approval state off every re-push.
 # ---------------------------------------------------------------------------
 
+
 class TestSlotsEnvelopePosture:
     def _state(self):
         from kiro_crew.dashboard.state import DashboardState
+
         slot = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="a")
         state = MagicMock(spec=DashboardState)
         state._slots = {"a": slot}
-        state._serialize_for_client = (
-            DashboardState._serialize_for_client.__get__(state)
-        )
+        state._serialize_for_client = DashboardState._serialize_for_client.__get__(state)
         return state
 
     def _ws(self, events):
@@ -2054,6 +2545,7 @@ class TestSlotsEnvelopePosture:
 
     def _envelope(self, events):
         import json
+
         return json.loads(
             self._state()._serialize_for_client(
                 self._ws(events),
@@ -2106,12 +2598,11 @@ class TestSlotsEnvelopePosture:
         re-push would leave the first frame after connect leaking.
         """
         src = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "dashboard" / "ws.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "dashboard" / "ws.py"
         ).read_text(encoding="utf-8")
-        assert "slots_envelope_extras(" in src, (
-            "ws.py connect push must route the envelope through the gate helper"
-        )
+        assert (
+            "slots_envelope_extras(" in src
+        ), "ws.py connect push must route the envelope through the gate helper"
         assert '"yolo": state._yolo,' not in src.replace(
             '{"yolo": state._yolo}', ""
         ), "ws.py must not put yolo on an app envelope unconditionally"
@@ -2119,6 +2610,7 @@ class TestSlotsEnvelopePosture:
     def test_source_guard_yolo_scope_is_not_a_parallel_name(self):
         """The scope reuses the one that already gates ``yolo_expired``."""
         from kiro_crew.dashboard import ws_event_scope as mod
+
         assert mod._YOLO_SCOPE == mod._GLOBAL_EVENT_DECLARATIONS["yolo_expired"]
 
 
@@ -2128,16 +2620,21 @@ class TestSlotsEnvelopePosture:
 # the broadcast path stalls every other request and the heartbeat with it.
 # ---------------------------------------------------------------------------
 
+
 class TestExposeToCacheNeverBlocksTheLoop:
     def setup_method(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         mod._exposeto_cache.clear()
         mod._exposeto_refreshing.clear()
 
     def test_cold_miss_does_not_read_from_the_hot_path(self):
         from kiro_crew.dashboard import ws_event_scope as mod
-        with patch.object(mod, "get_app_manifest") as gm, \
-                patch.object(mod, "_schedule_expose_to_refresh") as sched:
+
+        with (
+            patch.object(mod, "get_app_manifest") as gm,
+            patch.object(mod, "_schedule_expose_to_refresh") as sched,
+        ):
             assert mod._load_expose_to("other-app") == frozenset()
             gm.assert_not_called()
             sched.assert_called_once_with("other-app")
@@ -2145,23 +2642,29 @@ class TestExposeToCacheNeverBlocksTheLoop:
     def test_cold_miss_fails_closed(self):
         """Withholding one frame is the safe direction; granting is not."""
         from kiro_crew.dashboard import ws_event_scope as mod
+
         with patch.object(mod, "_schedule_expose_to_refresh"):
             assert mod._load_expose_to("other-app") == frozenset()
 
     def test_stale_entry_is_served_not_reloaded(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         stale = frozenset({"mochi-pet"})
         mod._exposeto_cache["other-app"] = (
-            time.monotonic() - (mod._MANIFEST_EXPOSE_TTL_SECS + 5), stale
+            time.monotonic() - (mod._MANIFEST_EXPOSE_TTL_SECS + 5),
+            stale,
         )
-        with patch.object(mod, "get_app_manifest") as gm, \
-                patch.object(mod, "_schedule_expose_to_refresh") as sched:
+        with (
+            patch.object(mod, "get_app_manifest") as gm,
+            patch.object(mod, "_schedule_expose_to_refresh") as sched,
+        ):
             assert mod._load_expose_to("other-app") == stale
             gm.assert_not_called()
             sched.assert_called_once_with("other-app")
 
     def test_fresh_entry_schedules_nothing(self):
         from kiro_crew.dashboard import ws_event_scope as mod
+
         fresh = frozenset({"mochi-pet"})
         mod._exposeto_cache["other-app"] = (time.monotonic(), fresh)
         with patch.object(mod, "_schedule_expose_to_refresh") as sched:
@@ -2171,6 +2674,7 @@ class TestExposeToCacheNeverBlocksTheLoop:
     def test_refresh_is_coalesced_across_a_broadcast_burst(self):
         """One frame x many clients must not queue one thread job each."""
         from kiro_crew.dashboard import ws_event_scope as mod
+
         loop = MagicMock()
         with patch.object(mod.asyncio, "get_running_loop", return_value=loop):
             for _ in range(25):
@@ -2181,6 +2685,7 @@ class TestExposeToCacheNeverBlocksTheLoop:
         """Off the loop (tests, CLI) blocking is fine -- and refusing to load
         at all would leave the cache permanently cold."""
         from kiro_crew.dashboard import ws_event_scope as mod
+
         with patch.object(mod, "_read_expose_to", return_value=frozenset({"x"})):
             mod._schedule_expose_to_refresh("other-app")
         assert mod._exposeto_cache["other-app"][1] == frozenset({"x"})
@@ -2197,9 +2702,9 @@ class TestExposeToCacheNeverBlocksTheLoop:
         catching the regression.
         """
         from kiro_crew.dashboard import ws_event_scope as mod  # noqa: F401
+
         src = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "dashboard" / "ws.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "dashboard" / "ws.py"
         ).read_text(encoding="utf-8")
 
         # Drop the import block: a loader NAME appearing in an import is not a
@@ -2213,7 +2718,7 @@ class TestExposeToCacheNeverBlocksTheLoop:
         checked = 0
         for loader in blocking_loaders:
             for match in re.finditer(re.escape(loader), norm):
-                window = norm[max(0, match.start() - 80):match.start()]
+                window = norm[max(0, match.start() - 80) : match.start()]
                 assert "to_thread" in window, (
                     f"{loader} reads the manifest from disk, so the call must be "
                     f"wrapped in asyncio.to_thread; context: "
@@ -2234,12 +2739,10 @@ class TestExposeToCacheNeverBlocksTheLoop:
         manifest.
         """
         src = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "dashboard" / "ws.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "dashboard" / "ws.py"
         ).read_text(encoding="utf-8")
         assert "if not app_enabled:" in src and "ws.close(" in src, (
-            "ws.py must close the socket when the connect read reports the app "
-            "disabled"
+            "ws.py must close the socket when the connect read reports the app " "disabled"
         )
         # The refusal has to precede registration, or there is no cleanup scope.
         assert src.index("if not app_enabled:") < src.index("state.register_ws("), (
@@ -2260,6 +2763,7 @@ class TestExposeToCacheNeverBlocksTheLoop:
         import inspect
 
         from kiro_crew.apps import manager
+
         src = inspect.getsource(manager.get_app_manifest)
         assert "from_json_file" in src and "cache" not in src.lower()
 
@@ -2267,6 +2771,7 @@ class TestExposeToCacheNeverBlocksTheLoop:
 # ---------------------------------------------------------------------------
 # subscribe_logs / subscribe_subagents subscription-layer gate
 # ---------------------------------------------------------------------------
+
 
 class TestSubscribeHandlerGates:
     """The WS ``subscribe_logs`` and ``subscribe_subagents`` handlers replay
@@ -2299,12 +2804,10 @@ class TestSubscribeHandlerGates:
         # variable it reads: the set is resolved live (``_live``) rather than from
         # the connect snapshot, and a guard naming the old variable would resist
         # that fix instead of catching a missing gate.
-        assert '"log" in _live' in src, (
-            "subscribe_logs must remain gated on the log scope"
-        )
-        assert '"log:all" in _live' in src, (
-            "the replay gate must accept log:all, like the per-event chokepoint"
-        )
+        assert '"log" in _live' in src, "subscribe_logs must remain gated on the log scope"
+        assert (
+            '"log:all" in _live' in src
+        ), "the replay gate must accept log:all, like the per-event chokepoint"
         assert "log_scope_not_declared" in src, "the log deny must stay audited"
 
     def test_subscribe_subagents_has_no_declaration_gate(self):
@@ -2317,9 +2820,9 @@ class TestSubscribeHandlerGates:
         not come back.
         """
         src = self._ws_source()
-        assert "subagent_scope_not_declared" not in src, (
-            "the declaration-level subscribe_subagents rejection must not return"
-        )
+        assert (
+            "subagent_scope_not_declared" not in src
+        ), "the declaration-level subscribe_subagents rejection must not return"
         assert "state.subscribe_subagents(ws)" in src
 
     def test_subagent_snapshot_replay_uses_per_item_scope_check(self):
@@ -2329,12 +2832,16 @@ class TestSubscribeHandlerGates:
         # snapshot even after passing the subscribe_subagents gate.
         slot = _make_slot(owner_app="other-app", origin=SlotOrigin.APP, key="s1")
         state = _make_state({"s1": slot})
-        assert ws_event_allowed(
-            "subagent_snapshot", {"slot": "s1", "id": "a1"},
-            app="mochi-pet",
-            allowed_events=_allowed("subagent"),  # own-only
-            state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "subagent_snapshot",
+                {"slot": "s1", "id": "a1"},
+                app="mochi-pet",
+                allowed_events=_allowed("subagent"),  # own-only
+                state=state,
+            )
+            is False
+        )
 
     def test_subscribe_denials_emit_sel_audit(self):
         # Behavioral: driving the actual subscribe handler would require an
@@ -2342,6 +2849,7 @@ class TestSubscribeHandlerGates:
         # with the two reasons the handlers use, and confirm the SEL call
         # is made.
         from kiro_crew.dashboard import ws_event_scope as _wes
+
         with patch("kiro_crew.sel.sel") as sel_mock:
             _wes._audit_deny("mochi-pet", "subscribe_logs", "log_scope_not_declared")
             outcomes = [
@@ -2355,6 +2863,7 @@ class TestSubscribeHandlerGates:
 # exposeToApps TTL cache — hot-path performance vs disk I/O
 # ---------------------------------------------------------------------------
 
+
 class TestExposeToAppsCache:
     """``_target_exposes_to`` runs on the WS broadcast hot path. Without a
     local cache, ``get_app_manifest`` re-reads the JSON manifest from disk on
@@ -2364,6 +2873,7 @@ class TestExposeToAppsCache:
 
     def test_repeated_calls_hit_cache_and_do_not_reread_manifest(self):
         from kiro_crew.dashboard import ws_event_scope as _wes
+
         manifest = MagicMock()
         manifest.permissions.exposeToApps = ["monitor-app"]
         with patch(
@@ -2379,6 +2889,7 @@ class TestExposeToAppsCache:
 
     def test_cache_denies_when_manifest_missing(self):
         from kiro_crew.dashboard import ws_event_scope as _wes
+
         with patch(
             "kiro_crew.dashboard.ws_event_scope.get_app_manifest",
             return_value=None,
@@ -2389,6 +2900,7 @@ class TestExposeToAppsCache:
 
     def test_cache_denies_on_manifest_load_failure(self):
         from kiro_crew.dashboard import ws_event_scope as _wes
+
         with patch(
             "kiro_crew.dashboard.ws_event_scope.get_app_manifest",
             side_effect=RuntimeError("boom"),
@@ -2403,13 +2915,15 @@ class TestExposeToAppsCache:
         ``app_events_revoked`` already applies to the target's own socket.
         """
         from kiro_crew.dashboard import ws_event_scope as _wes
+
         manifest = MagicMock()
         manifest.permissions.exposeToApps = ["monitor-app"]
-        with patch(
-            "kiro_crew.dashboard.ws_event_scope.get_app_manifest",
-            return_value=manifest,
-        ) as m, patch(
-            "kiro_crew.dashboard.ws_event_scope.is_app_enabled", return_value=False
+        with (
+            patch(
+                "kiro_crew.dashboard.ws_event_scope.get_app_manifest",
+                return_value=manifest,
+            ) as m,
+            patch("kiro_crew.dashboard.ws_event_scope.is_app_enabled", return_value=False),
         ):
             state = MagicMock()
             assert _wes._target_exposes_to("mochi-pet", "monitor-app", state) is False
@@ -2465,6 +2979,7 @@ class TestEventTableCompleteness:
         drift loop stops covering it.
         """
         from kiro_crew.dashboard import ws_event_scope as mod
+
         assert mod._SUBAGENT_EVENTS <= mod._SLOT_SCOPED_EVENTS, (
             mod._SUBAGENT_EVENTS - mod._SLOT_SCOPED_EVENTS
         )
@@ -2544,9 +3059,7 @@ class TestEventTableCompleteness:
                 else:
                     continue  # dynamic event type -- cannot be checked statically
                 if event_name not in classified:
-                    unclassified.append(
-                        (str(path.relative_to(root)), first.lineno, event_name)
-                    )
+                    unclassified.append((str(path.relative_to(root)), first.lineno, event_name))
 
         assert not unclassified, (
             "These WS events are broadcast but not classified in "
@@ -2583,6 +3096,7 @@ class TestEventTableCompleteness:
 # Write-side origin: an undeclared slot must NOT be called USER
 # ---------------------------------------------------------------------------
 
+
 class TestUntaggedOriginIsNotUser:
     """The read side already failed closed on a missing ``_origin``; the WRITE
     side did not. ``origin or (APP if app else USER)`` labelled every untagged
@@ -2593,20 +3107,19 @@ class TestUntaggedOriginIsNotUser:
     def test_untagged_non_app_slot_is_not_user(self):
         from kiro_crew.dashboard.state import SlotOrigin, request_slot_origin
 
-        src = Path(
-            __import__("kiro_crew.dashboard.state", fromlist=["x"]).__file__
-        ).read_text(encoding="utf-8")
+        src = Path(__import__("kiro_crew.dashboard.state", fromlist=["x"]).__file__).read_text(
+            encoding="utf-8"
+        )
         # The fail-open derivation must be gone from the CREATION path. It
         # still exists once, inside request_slot_origin -- that is the point:
         # the derivation moved to the layer that can actually make it.
         assert (
-            "slot._origin = origin or (SlotOrigin.APP if app else SlotOrigin.USER)"
-            not in src
+            "slot._origin = origin or (SlotOrigin.APP if app else SlotOrigin.USER)" not in src
         ), "get_or_create_slot must not infer USER; it cannot know"
         assert 'slot._origin = origin or (SlotOrigin.APP if app else "")' in src
-        assert src.count("SlotOrigin.APP if app else SlotOrigin.USER") == 1, (
-            "the USER derivation belongs only in request_slot_origin"
-        )
+        assert (
+            src.count("SlotOrigin.APP if app else SlotOrigin.USER") == 1
+        ), "the USER derivation belongs only in request_slot_origin"
 
         # USER is decided by the layer that knows: did a request carry a token?
         assert request_slot_origin("") == SlotOrigin.USER
@@ -2650,9 +3163,7 @@ class TestUntaggedOriginIsNotUser:
         # Search from the resume handler's definition so the helper (defined
         # earlier in the file) is not what the indices land on.
         resume_def = src.index("async def api_chat_slot_resume(")
-        meta_read = src.index(
-            "meta = state.conversation_log.get_metadata(history_key)", resume_def
-        )
+        meta_read = src.index("meta = state.conversation_log.get_metadata(history_key)", resume_def)
         resume_create = src.index("_materialise_slot_from_history(", resume_def)
         assert meta_read < resume_create, (
             "the resume path must read the persisted metadata before it calls "
@@ -2663,21 +3174,24 @@ class TestUntaggedOriginIsNotUser:
     def test_cron_injection_declares_cron(self):
         import kiro_crew.dashboard.cron_inject as _ci
 
-        assert "origin=SlotOrigin.CRON" in Path(_ci.__file__).read_text(encoding="utf-8"), (
-            "a cron result is the job's output, never something the user typed"
-        )
+        assert "origin=SlotOrigin.CRON" in Path(_ci.__file__).read_text(
+            encoding="utf-8"
+        ), "a cron result is the job's output, never something the user typed"
 
     def test_rehydrate_restores_the_persisted_origin(self):
         """Re-deriving on restart would relabel a cron slot USER (leak) and a
         real user slot untagged (dropping a grant an app legitimately holds)."""
         import kiro_crew.dashboard.chat_persistence as _cp
 
-        assert 'origin=str(meta.get("origin", ""))' in Path(_cp.__file__).read_text(encoding="utf-8")
+        assert 'origin=str(meta.get("origin", ""))' in Path(_cp.__file__).read_text(
+            encoding="utf-8"
+        )
 
 
 # ---------------------------------------------------------------------------
 # The legacy "*" declaration
 # ---------------------------------------------------------------------------
+
 
 class TestWildcardDeclaration:
     """``permissions.events: ["*"]`` predates this vocabulary and meant every
@@ -2700,9 +3214,7 @@ class TestWildcardDeclaration:
         )
 
         allowed = build_allowed_event_set(["*"])
-        missing = sorted(
-            d for d in set(_GLOBAL_EVENT_DECLARATIONS.values()) if d not in allowed
-        )
+        missing = sorted(d for d in set(_GLOBAL_EVENT_DECLARATIONS.values()) if d not in allowed)
         assert not missing, f"wildcard omits declarations: {missing}"
 
     def test_ordinary_declarations_pass_through_unchanged(self):
@@ -2716,6 +3228,7 @@ class TestWildcardDeclaration:
 # ---------------------------------------------------------------------------
 # Notification source: canonical, prefixed, and system-only
 # ---------------------------------------------------------------------------
+
 
 class TestNotificationSourceParsing:
     """The note's field is ``source`` and an app push is ``app:<name>``.
@@ -2736,9 +3249,7 @@ class TestNotificationSourceParsing:
 
         # api_push_notification builds `source=f"app:{app_name}"`.
         push = Path(
-            __import__(
-                "kiro_crew.dashboard.handlers.notifications_push", fromlist=["x"]
-            ).__file__
+            __import__("kiro_crew.dashboard.handlers.notifications_push", fromlist=["x"]).__file__
         ).read_text(encoding="utf-8")
         assert f'source=f"{wes._APP_SOURCE_PREFIX}{{app_name}}"' in push
 
@@ -2755,31 +3266,61 @@ class TestNotificationSourceParsing:
     def test_own_push_reaches_only_its_own_app(self):
         state = _make_state()
         note = {"source": "app:mochi-pet", "text": "hi"}
-        assert ws_event_allowed(
-            "notification", note, app="mochi-pet",
-            allowed_events=_allowed("notification"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "notification",
+                note,
+                app="mochi-pet",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is True
+        )
         # The leak: a SECOND app holding the system scope must not receive it.
-        assert ws_event_allowed(
-            "notification", note, app="other-app",
-            allowed_events=_allowed("notification:system"), state=state,
-        ) is False
-        assert ws_event_allowed(
-            "notification", note, app="other-app",
-            allowed_events=_allowed("notification"), state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "notification",
+                note,
+                app="other-app",
+                allowed_events=_allowed("notification:system"),
+                state=state,
+            )
+            is False
+        )
+        assert (
+            ws_event_allowed(
+                "notification",
+                note,
+                app="other-app",
+                allowed_events=_allowed("notification"),
+                state=state,
+            )
+            is False
+        )
 
     def test_only_the_literal_system_source_is_the_system_stream(self):
         state = _make_state()
         for source in ("app:other-app", "notifications_api", "", "System", "sys"):
-            assert ws_event_allowed(
-                "notification", {"source": source}, app="mochi-pet",
-                allowed_events=_allowed("notification:system"), state=state,
-            ) is False, f"{source!r} must not read as the system stream"
-        assert ws_event_allowed(
-            "notification", {"source": "system"}, app="mochi-pet",
-            allowed_events=_allowed("notification:system"), state=state,
-        ) is True
+            assert (
+                ws_event_allowed(
+                    "notification",
+                    {"source": source},
+                    app="mochi-pet",
+                    allowed_events=_allowed("notification:system"),
+                    state=state,
+                )
+                is False
+            ), f"{source!r} must not read as the system stream"
+        assert (
+            ws_event_allowed(
+                "notification",
+                {"source": "system"},
+                app="mochi-pet",
+                allowed_events=_allowed("notification:system"),
+                state=state,
+            )
+            is True
+        )
 
     def test_ack_events_need_the_broad_scope(self):
         """`notification_ack`/`_unack` broadcast a bare `{"ts": ...}`.
@@ -2802,27 +3343,52 @@ class TestNotificationSourceParsing:
             assert event not in _SOURCE_FILTERED_EVENTS
             assert event in _UNATTRIBUTED_NOTIFICATION_EVENTS
             payload = {"ts": "2026-08-04T00:00:00Z"}
-            assert ws_event_allowed(
-                event, payload, app="mochi-pet",
-                allowed_events=_allowed("notification"), state=state,
-            ) is False
-            assert ws_event_allowed(
-                event, payload, app="mochi-pet",
-                allowed_events=_allowed("notification:system"), state=state,
-            ) is False
-            assert ws_event_allowed(
-                event, payload, app="mochi-pet",
-                allowed_events=_allowed("notification:all"), state=state,
-            ) is True
-            assert ws_event_allowed(
-                event, payload, app="mochi-pet",
-                allowed_events=_allowed("log"), state=state,
-            ) is False
+            assert (
+                ws_event_allowed(
+                    event,
+                    payload,
+                    app="mochi-pet",
+                    allowed_events=_allowed("notification"),
+                    state=state,
+                )
+                is False
+            )
+            assert (
+                ws_event_allowed(
+                    event,
+                    payload,
+                    app="mochi-pet",
+                    allowed_events=_allowed("notification:system"),
+                    state=state,
+                )
+                is False
+            )
+            assert (
+                ws_event_allowed(
+                    event,
+                    payload,
+                    app="mochi-pet",
+                    allowed_events=_allowed("notification:all"),
+                    state=state,
+                )
+                is True
+            )
+            assert (
+                ws_event_allowed(
+                    event,
+                    payload,
+                    app="mochi-pet",
+                    allowed_events=_allowed("log"),
+                    state=state,
+                )
+                is False
+            )
 
 
 # ---------------------------------------------------------------------------
 # App-published events ride one fixed WS type
 # ---------------------------------------------------------------------------
+
 
 class TestAppEventFrames:
     """Every app event arrives as WS type ``app_event`` with the real name inside.
@@ -2846,10 +3412,16 @@ class TestAppEventFrames:
 
     def test_publisher_receives_its_own_event(self):
         state = _make_state()
-        assert ws_event_allowed(
-            "app_event", self._frame("mochi", "tick"),
-            app="mochi", allowed_events=_allowed("slots:own"), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "app_event",
+                self._frame("mochi", "tick"),
+                app="mochi",
+                allowed_events=_allowed("slots:own"),
+                state=state,
+            )
+            is True
+        )
 
     def test_wildcard_app_still_receives_its_own_event(self):
         """`events: ["*"]` expands into CORE scopes, which cannot contain an
@@ -2858,27 +3430,44 @@ class TestAppEventFrames:
         from kiro_crew.dashboard.ws_event_scope import build_allowed_event_set
 
         state = _make_state()
-        assert ws_event_allowed(
-            "app_event", self._frame("mochi", "tick"),
-            app="mochi", allowed_events=build_allowed_event_set(["*"]), state=state,
-        ) is True
+        assert (
+            ws_event_allowed(
+                "app_event",
+                self._frame("mochi", "tick"),
+                app="mochi",
+                allowed_events=build_allowed_event_set(["*"]),
+                state=state,
+            )
+            is True
+        )
 
     def test_another_apps_event_is_denied(self):
         """App events have no cross-app opt-in -- exposeToApps covers slots."""
         state = _make_state()
-        assert ws_event_allowed(
-            "app_event", self._frame("workflows", "tick"),
-            app="mochi", allowed_events=_allowed("slots:all", "notification:all"),
-            state=state,
-        ) is False
+        assert (
+            ws_event_allowed(
+                "app_event",
+                self._frame("workflows", "tick"),
+                app="mochi",
+                allowed_events=_allowed("slots:all", "notification:all"),
+                state=state,
+            )
+            is False
+        )
 
     def test_unattributable_envelope_is_denied(self):
         state = _make_state()
         for frame in ({"event": "tick"}, {"app": "mochi"}, {}, {"app": "", "event": ""}):
-            assert ws_event_allowed(
-                "app_event", frame, app="mochi",
-                allowed_events=_allowed("slots:own"), state=state,
-            ) is False, f"{frame!r} must be denied"
+            assert (
+                ws_event_allowed(
+                    "app_event",
+                    frame,
+                    app="mochi",
+                    allowed_events=_allowed("slots:own"),
+                    state=state,
+                )
+                is False
+            ), f"{frame!r} must be denied"
 
 
 class TestConstantValuedEventNamesAreClassified:
@@ -2903,6 +3492,7 @@ class TestConstantValuedEventNamesAreClassified:
 # attribute to a slot. The producers originally sent only {id, approved}, which
 # meant an app received its approval REQUEST but never the RESOLUTION.
 # ---------------------------------------------------------------------------
+
 
 class TestApprovalResolvedCarriesSlot:
     @staticmethod
@@ -2940,9 +3530,7 @@ class TestApprovalResolvedCarriesSlot:
         async def _run():
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
             slot._approval_futures["a1"] = fut
-            with patch.object(state, "broadcast_ws") as bws, patch(
-                "kiro_crew.dashboard.state.sel"
-            ):
+            with patch.object(state, "broadcast_ws") as bws, patch("kiro_crew.dashboard.state.sel"):
                 state.resolve_approval("a1", True)
             return [c for c in bws.call_args_list if c.args[0] == "approval_resolved"]
 
@@ -2962,9 +3550,7 @@ class TestApprovalResolvedCarriesSlot:
         async def _run():
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
             state._approval_futures["b1"] = fut
-            with patch.object(state, "broadcast_ws") as bws, patch(
-                "kiro_crew.dashboard.state.sel"
-            ):
+            with patch.object(state, "broadcast_ws") as bws, patch("kiro_crew.dashboard.state.sel"):
                 state.resolve_state_approval("b1", True)
             return [c for c in bws.call_args_list if c.args[0] == "approval_resolved"]
 
@@ -2985,23 +3571,25 @@ class TestApprovalResolvedCarriesSlot:
         async def _run():
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
             slot._approval_futures["a1"] = fut
-            with patch.object(state, "broadcast_ws") as bws, patch(
-                "kiro_crew.dashboard.state.sel"
-            ):
+            with patch.object(state, "broadcast_ws") as bws, patch("kiro_crew.dashboard.state.sel"):
                 state.resolve_approval("a1", True)
-            return next(
-                c.args[1] for c in bws.call_args_list if c.args[0] == "approval_resolved"
-            )
+            return next(c.args[1] for c in bws.call_args_list if c.args[0] == "approval_resolved")
 
         payload = asyncio.run(_run())
         assert ws_event_allowed(
-            "approval_resolved", payload,
-            app="mochi-pet", allowed_events=frozenset(), state=state,
+            "approval_resolved",
+            payload,
+            app="mochi-pet",
+            allowed_events=frozenset(),
+            state=state,
         )
         # ...and a DIFFERENT app still must not see it.
         assert not ws_event_allowed(
-            "approval_resolved", payload,
-            app="other-app", allowed_events=frozenset(), state=state,
+            "approval_resolved",
+            payload,
+            app="other-app",
+            allowed_events=frozenset(),
+            state=state,
         )
 
     def test_every_approval_resolved_producer_sends_a_slot(self):
@@ -3041,6 +3629,7 @@ class TestApprovalResolvedCarriesSlot:
 # shipped consumers (``design_critique`` declares it in app.json).
 # ---------------------------------------------------------------------------
 
+
 class TestApiStatusRequiresDeclaration:
     def test_declared_app_still_reaches_api_status(self):
         """Removing the implicit grant must not break apps that declare it."""
@@ -3051,9 +3640,7 @@ class TestApiStatusRequiresDeclaration:
             assert app_token_path_allowed("design-critique", "/api/status") is True
 
     def test_undeclared_app_is_denied_api_status(self):
-        with patch(
-            "kiro_crew.dashboard.token_auth._app_api_allowlist", return_value=()
-        ):
+        with patch("kiro_crew.dashboard.token_auth._app_api_allowlist", return_value=()):
             assert app_token_path_allowed("mochi-pet", "/api/status") is False
 
     def test_shipped_manifests_that_use_api_status_declare_it(self):
@@ -3069,19 +3656,12 @@ class TestApiStatusRequiresDeclaration:
         """
         import json
 
-        builtins = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "apps" / "builtins"
-        )
-        frontends = (
-            Path(__file__).resolve().parents[1] / "website" / "src" / "apps"
-        )
+        builtins = Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "apps" / "builtins"
+        frontends = Path(__file__).resolve().parents[1] / "website" / "src" / "apps"
 
         declared: list[str] = []
         for manifest in builtins.glob("*/app.json"):
-            perms = json.loads(
-                manifest.read_text(encoding="utf-8")
-            ).get("permissions", {})
+            perms = json.loads(manifest.read_text(encoding="utf-8")).get("permissions", {})
             api = perms.get("api") or []
             if isinstance(api, list) and "/api/status" in api:
                 declared.append(manifest.parent.name)
@@ -3127,6 +3707,7 @@ class TestApiStatusRequiresDeclaration:
 # ``slot`` on a ``notification`` frame.
 # ---------------------------------------------------------------------------
 
+
 class TestGlobalEventWithSlotDoesNotBypassScope:
     def _state_with_own_slot(self):
         slot = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="chat-1")
@@ -3144,8 +3725,11 @@ class TestGlobalEventWithSlotDoesNotBypassScope:
             "slot": "chat-1",  # flat-merged from notify(meta={"slot": ...})
         }
         assert not ws_event_allowed(
-            "notification", payload,
-            app="mochi-pet", allowed_events=frozenset({"slots:all"}), state=state,
+            "notification",
+            payload,
+            app="mochi-pet",
+            allowed_events=frozenset({"slots:all"}),
+            state=state,
         )
 
     def test_notification_with_slot_delivered_when_scope_declared(self):
@@ -3161,7 +3745,8 @@ class TestGlobalEventWithSlotDoesNotBypassScope:
             "slot": "chat-1",
         }
         assert ws_event_allowed(
-            "notification", payload,
+            "notification",
+            payload,
             app="mochi-pet",
             allowed_events=frozenset({"notification:system"}),
             state=state,
@@ -3171,16 +3756,14 @@ class TestGlobalEventWithSlotDoesNotBypassScope:
         """Source guard: this whole class is only meaningful because a shipped
         caller flat-merges a slot onto a global notification frame."""
         gw = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "slack" / "gateway.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "slack" / "gateway.py"
         ).read_text(encoding="utf-8")
         assert 'meta={"slot": slot.key}' in gw
 
     def test_meta_merge_is_flat_so_slot_lands_top_level(self):
         """Source guard on the mechanism: bus.push merges meta keys flat."""
         bus = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "notifications" / "bus.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "notifications" / "bus.py"
         ).read_text(encoding="utf-8")
         assert "note[key] = value" in bus
 
@@ -3192,22 +3775,24 @@ class TestGlobalEventWithSlotDoesNotBypassScope:
 # ALL subagent status/output) but be filtered per item.
 # ---------------------------------------------------------------------------
 
+
 class TestSubagentBatchFrames:
     def _state(self):
         mine = _make_slot(owner_app="mochi-pet", origin=SlotOrigin.APP, key="mine")
         theirs = _make_slot(owner_app="other-app", origin=SlotOrigin.APP, key="theirs")
         return _make_state({"mine": mine, "theirs": theirs})
 
-    @pytest.mark.parametrize(
-        "event", ["subagent_batch_update", "subagent_batch_chunks"]
-    )
+    @pytest.mark.parametrize("event", ["subagent_batch_update", "subagent_batch_chunks"])
     def test_batch_frame_is_not_denied_as_unknown(self, event):
         """The frame must pass the gate — denying it starved apps of their OWN
         subagent events once the coalescer engaged."""
         state = self._state()
         assert ws_event_allowed(
-            event, {"updates": [], "chunks": []},
-            app="mochi-pet", allowed_events=frozenset(), state=state,
+            event,
+            {"updates": [], "chunks": []},
+            app="mochi-pet",
+            allowed_events=frozenset(),
+            state=state,
         )
 
     def test_filter_keeps_only_own_items(self):
@@ -3233,17 +3818,14 @@ class TestSubagentBatchFrames:
 
         state = self._state()
         items = [{"id": "a1", "slot": "mine"}, {"id": "a2", "slot": "theirs"}]
-        kept = filter_subagent_batch_for_app(
-            items, "mochi-pet", frozenset({"subagent:all"}), state
-        )
+        kept = filter_subagent_batch_for_app(items, "mochi-pet", frozenset({"subagent:all"}), state)
         assert len(kept) == 2
 
     def test_batch_events_really_exist_with_per_item_slots(self):
         """Source guard: this class is only meaningful while the coalescer emits
         these two frames AND seeds every buffered row with its slot."""
         src = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "subagent_scale.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "subagent_scale.py"
         ).read_text(encoding="utf-8")
         assert '"subagent_batch_update"' in src
         assert '"subagent_batch_chunks"' in src
@@ -3257,8 +3839,7 @@ class TestSubagentBatchFrames:
         from kiro_crew.dashboard.ws_event_scope import _SUBAGENT_BATCH_ITEM_KEY
 
         src = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "subagent_scale.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "subagent_scale.py"
         ).read_text(encoding="utf-8")
         assert '"subagent_batch_update", {"updates": updates}' in src
         assert '"subagent_batch_chunks", {"chunks": chunks}' in src
@@ -3276,6 +3857,7 @@ class TestSuppressedDenyCountIsReported:
 
     def _clear(self):
         from kiro_crew.dashboard import ws_event_scope as _wes
+
         _wes._sel_last_audit.clear()
 
     def test_next_emission_reports_the_suppressed_tally(self):
@@ -3317,6 +3899,7 @@ class TestSuppressedDenyCountIsReported:
             assert _wes._sel_last_audit[key][1] == 0
         self._clear()
 
+
 # ---------------------------------------------------------------------------
 # Direct-send grant auditing in ws.py
 #
@@ -3348,6 +3931,7 @@ class TestDirectSendGrantsAreAudited:
         ``__anext__`` raising ends the message loop, so a test that wants either
         one drives it explicitly instead of racing the real timers.
         """
+
         class FakeWebSocket:
             def __init__(self) -> None:
                 self.closed = True
@@ -3391,9 +3975,7 @@ class TestDirectSendGrantsAreAudited:
         from kiro_crew.dashboard.handlers import source_providers
 
         monkeypatch.setattr(ws_event_scope, "is_app_enabled", lambda _n: True)
-        monkeypatch.setattr(
-            ws_event_scope, "get_app_manifest", lambda _n: self._manifest(declared)
-        )
+        monkeypatch.setattr(ws_event_scope, "get_app_manifest", lambda _n: self._manifest(declared))
         monkeypatch.setattr(ws_event_scope, "_declared_cache", {})
 
         state = MagicMock()
@@ -3411,9 +3993,7 @@ class TestDirectSendGrantsAreAudited:
 
         fake_ws = self._fake_ws()
         monkeypatch.setattr(dashboard_ws, "_check_ws_origin", lambda request: None)
-        monkeypatch.setattr(
-            dashboard_ws.web, "WebSocketResponse", lambda **kwargs: fake_ws
-        )
+        monkeypatch.setattr(dashboard_ws.web, "WebSocketResponse", lambda **kwargs: fake_ws)
         monkeypatch.setattr(source_providers, "schedule_check_refresh", MagicMock())
 
         with patch.object(dashboard_ws, "_audit_grant_quietly") as audit:
@@ -3424,9 +4004,7 @@ class TestDirectSendGrantsAreAudited:
         """An app declaring ``yolo`` receives the live override state on the
         initial push -- a direct ``send_json``, so nothing else records it.
         """
-        fake_ws, audit = self._drive_connect(
-            monkeypatch, declared=["yolo"], yolo=True
-        )
+        fake_ws, audit = self._drive_connect(monkeypatch, declared=["yolo"], yolo=True)
 
         assert fake_ws.sent, "the initial slots push must still be delivered"
         assert fake_ws.sent[0].get("yolo") is True, (
@@ -3440,18 +4018,16 @@ class TestDirectSendGrantsAreAudited:
         """The audit follows the GRANT, not the code path: an app without the
         scope never receives ``yolo``, so there is nothing to record.
         """
-        fake_ws, audit = self._drive_connect(
-            monkeypatch, declared=["slots:own"], yolo=True
-        )
+        fake_ws, audit = self._drive_connect(monkeypatch, declared=["slots:own"], yolo=True)
 
         assert fake_ws.sent
-        assert "yolo" not in fake_ws.sent[0], (
-            "withheld field must be ABSENT, not sent as a falsy default"
-        )
+        assert (
+            "yolo" not in fake_ws.sent[0]
+        ), "withheld field must be ABSENT, not sent as a falsy default"
         events = [c.args[1] for c in audit.call_args_list]
-        assert "slots_yolo" not in events, (
-            "auditing a grant that did not happen would make the trail lie"
-        )
+        assert (
+            "slots_yolo" not in events
+        ), "auditing a grant that did not happen would make the trail lie"
 
     def test_subscribe_logs_grant_is_audited(self, monkeypatch):
         """The ring replay writes to the socket directly, so the grant that
@@ -3464,9 +4040,7 @@ class TestDirectSendGrantsAreAudited:
         from kiro_crew.dashboard.handlers import source_providers
 
         monkeypatch.setattr(ws_event_scope, "is_app_enabled", lambda _n: True)
-        monkeypatch.setattr(
-            ws_event_scope, "get_app_manifest", lambda _n: self._manifest(["log"])
-        )
+        monkeypatch.setattr(ws_event_scope, "get_app_manifest", lambda _n: self._manifest(["log"]))
         monkeypatch.setattr(ws_event_scope, "_declared_cache", {})
 
         state = MagicMock()
@@ -3505,9 +4079,7 @@ class TestDirectSendGrantsAreAudited:
 
         fake_ws = LoopWs()
         monkeypatch.setattr(dashboard_ws, "_check_ws_origin", lambda request: None)
-        monkeypatch.setattr(
-            dashboard_ws.web, "WebSocketResponse", lambda **kwargs: fake_ws
-        )
+        monkeypatch.setattr(dashboard_ws.web, "WebSocketResponse", lambda **kwargs: fake_ws)
         monkeypatch.setattr(source_providers, "schedule_check_refresh", MagicMock())
 
         with patch.object(dashboard_ws, "_audit_grant_quietly") as audit:
@@ -3515,9 +4087,7 @@ class TestDirectSendGrantsAreAudited:
 
         state.subscribe_logs.assert_called_once_with(fake_ws)
         events = [c.args[1] for c in audit.call_args_list]
-        assert "subscribe_logs" in events, (
-            "a granted log subscription must leave an SEL record"
-        )
+        assert "subscribe_logs" in events, "a granted log subscription must leave an SEL record"
 
     def test_audit_helper_records_the_grant(self):
         from kiro_crew.dashboard import ws as dashboard_ws
@@ -3543,9 +4113,7 @@ class TestDirectSendGrantsAreAudited:
         """
         from kiro_crew.dashboard import ws as dashboard_ws
 
-        with patch.object(
-            dashboard_ws, "_audit_allow", side_effect=RuntimeError("sink down")
-        ):
+        with patch.object(dashboard_ws, "_audit_allow", side_effect=RuntimeError("sink down")):
             # Must not raise.
             dashboard_ws._audit_grant_quietly("mochi-pet", "subscribe_logs")
 
@@ -3566,14 +4134,13 @@ class TestDirectSendGrantsAreAudited:
         off-loop guard in this file already went through.
         """
         src = (
-            Path(__file__).resolve().parents[1]
-            / "src" / "kiro_crew" / "dashboard" / "ws.py"
+            Path(__file__).resolve().parents[1] / "src" / "kiro_crew" / "dashboard" / "ws.py"
         ).read_text(encoding="utf-8")
         # The app-token narrowing block inside _push_status: it strips the
         # owner-only fields, and the grant must be recorded in the same branch.
         marker = 'for _owner_only in ("branch", "commit"):'
         assert marker in src, "the app-token narrowing block moved; re-anchor this guard"
-        region = " ".join(src[src.index(marker):].split())
+        region = " ".join(src[src.index(marker) :].split())
         # Look only as far as the send that ends the block.
         region = region[: region.index('ws.send_json({"type": "dashboard"')]
         # ``.*`` rather than ``[^)]*``: the auditee is now resolved by a nested
@@ -3748,9 +4315,9 @@ class TestDashboardUserGrantsAreAudited:
         with patch.object(dashboard_ws, "_audit_grant_quietly") as audit:
             _aio.run(dashboard_ws.api_ws(self._dashboard_request(state)))  # type: ignore[arg-type]
 
-        assert fake_ws.sent and fake_ws.sent[0].get("yolo") is True, (
-            "the dashboard user must actually receive the field"
-        )
+        assert (
+            fake_ws.sent and fake_ws.sent[0].get("yolo") is True
+        ), "the dashboard user must actually receive the field"
         assert (DASHBOARD_USER_AUDITEE, "slots_yolo") in [
             tuple(c.args) for c in audit.call_args_list
         ]
@@ -3828,13 +4395,11 @@ class TestDashboardUserGrantsAreAudited:
         ]
         state.subagents = None
         with patch("kiro_crew.sel.sel") as sel_mock:
-            fake_ws = self._drive_one_message(
-                monkeypatch, state, {"type": "subscribe_subagents"}
-            )
+            fake_ws = self._drive_one_message(monkeypatch, state, {"type": "subscribe_subagents"})
 
-        assert any(f.get("type") == "subagent_snapshot" for f in fake_ws.sent), (
-            "the replay frame must still be delivered"
-        )
+        assert any(
+            f.get("type") == "subagent_snapshot" for f in fake_ws.sent
+        ), "the replay frame must still be delivered"
         assert (DASHBOARD_USER_AUDITEE, "subagent_snapshot") in _granted(sel_mock)
 
     def test_periodic_dashboard_frame_grant_covers_both_socket_kinds(self):

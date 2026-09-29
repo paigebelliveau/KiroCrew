@@ -3805,6 +3805,10 @@ async def api_app_token(request: web.Request) -> web.Response:
     middleware can extract the verified app identity.
     """
     from kiro_crew.dashboard.token_auth import generate_token, validate_app_secret
+    from kiro_crew.eventlog.grants import (
+        InstallationGenerationLockUnavailable,
+        installation_generation_lock,
+    )
     from kiro_crew.sel import sel
 
     app_name = request.match_info["name"]
@@ -3819,7 +3823,42 @@ async def api_app_token(request: web.Request) -> web.Response:
         )
         return web.json_response({"error": "missing X-App-Secret header"}, status=403)
 
-    if not validate_app_secret(app_name, provided_secret):
+    # GPT 6.1 F1: serialize the secret validation AND the token mint against a
+    # concurrent uninstall's generation retirement + credential teardown, under
+    # the SAME cross-process lock the uninstall holds. Without this, the retiring
+    # app could exchange its still-present secret in the window between the
+    # uninstall's generation bump and the secret removal, minting a token stamped
+    # with the advanced generation that then authenticates against a same-name
+    # reinstall. The lock acquire + the two synchronous store calls under it are
+    # offloaded off the event loop (no-sync-store-call-from-a-coroutine). On a
+    # lock-unavailable fault we fail closed with a 503 rather than minting
+    # unserialized. ``validate_app_secret`` runs under the lock, so once the
+    # uninstall has removed the secret the exchange simply fails to validate.
+    def _validate_and_mint() -> tuple[bool, str]:
+        with installation_generation_lock(app_name):
+            if not validate_app_secret(app_name, provided_secret):
+                return False, ""
+            return True, generate_token(app_name, app=app_name)
+
+    try:
+        ok, token = await asyncio.to_thread(_validate_and_mint)
+    except InstallationGenerationLockUnavailable:
+        sel().log_api_access(
+            caller=app_name,
+            operation="app_token_exchange",
+            outcome="denied",
+            source="app_auth",
+            error="retirement lock unavailable",
+        )
+        return web.json_response(
+            {
+                "error": "token exchange temporarily unavailable; retry",
+                "code": "token_exchange_unavailable",
+            },
+            status=503,
+        )
+
+    if not ok:
         sel().log_api_access(
             caller=app_name,
             operation="app_token_exchange",
@@ -3829,7 +3868,6 @@ async def api_app_token(request: web.Request) -> web.Response:
         )
         return web.json_response({"error": "invalid secret"}, status=403)
 
-    token = generate_token(app_name, app=app_name)
     sel().log_api_access(
         caller=app_name,
         operation="app_token_exchange",

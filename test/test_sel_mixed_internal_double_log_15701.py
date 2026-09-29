@@ -133,6 +133,11 @@ async def test_mixed_internal_app_token_keeps_layer_row(monkeypatch, remote):
     differ.
     """
     monkeypatch.setattr(ta, "app_token_path_allowed", lambda app_name, path: True)
+    # Enablement is now a separate request-time gate (``_enforce_app_scope`` calls
+    # ``_app_enablement_denied`` before the scope hop). This test stubs the scope
+    # decision to admit the token, so it must also present the app as enabled;
+    # otherwise the enablement gate refuses before the layer row is written.
+    monkeypatch.setattr(ta, "_app_enablement_denied", lambda app_name: False)
     calls = _capture_sel(monkeypatch)
     token = generate_token("someapp", ttl_seconds=300, app="someapp")
     bind_token_ip(token, remote)

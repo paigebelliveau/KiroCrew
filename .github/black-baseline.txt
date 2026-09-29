@@ -128,18 +128,15 @@ src/kiro_crew/apps/dependencies.py
 src/kiro_crew/apps/dependency_ledger.py
 src/kiro_crew/apps/dev_mode.py
 src/kiro_crew/apps/execution.py
-src/kiro_crew/apps/manager.py
 src/kiro_crew/apps/manifest.py
 src/kiro_crew/apps/module_loader.py
 src/kiro_crew/apps/permissions.py
 src/kiro_crew/apps/route_registry.py
 src/kiro_crew/apps/scaffold.py
-src/kiro_crew/apps/teardown.py
 src/kiro_crew/artifact_source.py
 src/kiro_crew/beacon.py
 src/kiro_crew/builtin_skills/browser-recording/scripts/record_browser.py
 src/kiro_crew/builtin_skills/ios-simulator-preview/scripts/sim_mirror.py
-src/kiro_crew/builtin_skills/kirocrew-dev/kirocrew-prepare-pr/scripts/local_review.py
 src/kiro_crew/changelog.py
 src/kiro_crew/channel_history.py
 src/kiro_crew/channel_transcript_migration.py
@@ -312,7 +309,6 @@ test/test_app_context.py
 test/test_app_dev_mode.py
 test/test_app_e2e.py
 test/test_app_execution.py
-test/test_app_manager.py
 test/test_app_manifest.py
 test/test_app_mcp_scoping.py
 test/test_app_permissions.py
@@ -696,7 +692,6 @@ test/test_node_version_pins.py
 test/test_notification_bus.py
 test/test_notification_legacy_actions.py
 test/test_notification_phase5.py
-test/test_notifications_push.py
 test/test_official_catalog.py
 test/test_omc_ledger_sync_coverage.py
 test/test_onboarding_import.py
@@ -916,6 +911,5 @@ test/test_workflows_store.py
 test/test_workspace_absolute_paths.py
 test/test_write_secret_file.py
 test/test_ws_and_plan_memory_fixes.py
-test/test_ws_event_scoping.py
 test/test_xdist_host_budget.py
 test/windows_sim.py
