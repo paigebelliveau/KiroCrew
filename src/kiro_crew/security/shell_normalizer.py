@@ -3574,8 +3574,13 @@ _SHELL_ASSIGN_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)$", re.DOTALL
 # vanish (e.g. g""it -> git, ca''t -> cat).
 _EMPTY_QUOTE_RE = re.compile(r'""|\'\'')
 
-# Regex for $HOME or ${HOME} variable expansion.
-_HOME_VAR_RE = re.compile(r"\$\{HOME\}|\$HOME", re.IGNORECASE)
+# Regex for $HOME or ${HOME} variable expansion. The bare ``$HOME`` form
+# requires a variable-name boundary after ``HOME`` (a following ``[A-Za-z0-9_]``
+# would make it a DIFFERENT variable), so ``$HOME_BACKUP`` is not mis-expanded to
+# the home path plus ``_BACKUP`` — which otherwise makes an unrelated variable
+# look like a home-directory target (issue review finding). ``${HOME}`` is
+# already delimited by its braces.
+_HOME_VAR_RE = re.compile(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])", re.IGNORECASE)
 
 # ANSI-C (``$'…'``) and locale (``$"…"``) quoting.  Both are QUOTING forms whose
 # value the shell computes before the program sees it, so they are resolved as part
