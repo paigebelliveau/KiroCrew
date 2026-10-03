@@ -20,7 +20,7 @@ import time
 from collections.abc import Awaitable, Callable, Container, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Optional, Protocol
+from typing import TYPE_CHECKING, AbstractSet, Any, Literal, NamedTuple, Optional, Protocol
 
 from kiro_crew.acp.liveness import (
     VERDICT_DEAD,
@@ -1063,11 +1063,18 @@ def format_subagent_usage(credits: object, elapsed: object) -> str:
 
 @dataclass(frozen=True)
 class SubagentDelivery:
-    """Terminal usage captured when a completion acquires delivery debt."""
+    """Terminal usage captured when a completion acquires delivery debt.
+
+    *report_owed* marks the debt of a memory-wait expiry rather than a run: the
+    store owes its report (``TaskStore.owed_reports``) until it reaches the
+    parent, and it has no run folder, so settling it clears that mark
+    (``taskq_clear_owed_reports``) and writes no ``delivered`` tombstone.
+    """
 
     agent_id: str
     elapsed: float
     credits: float
+    report_owed: bool = False
 
 
 @dataclass
@@ -2650,6 +2657,18 @@ class SubagentInfo:
     # digest COMPOSITION would re-open the restart-loss window between
     # composing and routing.
     _digest_settle_deliveries: list[SubagentDelivery] = field(default_factory=list)
+    # True on the synthetic record of a memory-wait expiry whose report the store
+    # owes until it reaches the parent (``finish(..., report_owed=True)``). The
+    # gateway reads it to carry that debt with a digest or a queued announce
+    # (``SubagentDelivery.report_owed``); the report's done-callback clears the
+    # store mark itself only when neither parked it.
+    _report_owed: bool = False
+    # True once an injection of this report was given up on: every attempt the
+    # gateway made failed, so at most a failure notice was queued for the
+    # parent's next turn (``notify_injection_failed``). ``_on_done`` still
+    # returns, so this is the only sign the parent was never told, and a
+    # memory-wait expiry's owed mark is not cleared while it is set.
+    _report_undelivered: bool = False
     # True when the gateway QUEUED this completion's injection because the
     # parent's slot was busy. Delivery is not consumption: the announce sits in
     # the slot queue until a turn drains it, and that wait is bounded only by the
@@ -3094,6 +3113,7 @@ class _ReportFailureSnapshot:
     _digest_flush_only: bool
     _digest_settle_deliveries: tuple[SubagentDelivery, ...]
     _delivery_queued: bool
+    _report_owed: bool
     credits: float
     _credit_accounting: None = None
 
@@ -3131,6 +3151,7 @@ class _ReportFailureSnapshot:
             _digest_flush_only=bool(info._digest_flush_only),
             _digest_settle_deliveries=tuple(info._digest_settle_deliveries),
             _delivery_queued=bool(info._delivery_queued),
+            _report_owed=bool(info._report_owed),
             credits=float(info.credits),
         )
 
@@ -3180,6 +3201,7 @@ class _ReportFailureSnapshot:
             _digest_flush_only=self._digest_flush_only,
             _digest_settle_deliveries=list(self._digest_settle_deliveries),
             _delivery_queued=self._delivery_queued,
+            _report_owed=self._report_owed,
             elapsed=self.elapsed,
             credits=self.credits,
             model=self.model,
@@ -3301,6 +3323,13 @@ DELIVERY_ROUTING_FIELDS: "dict[str, str]" = {
     # carries a fresh id, so an id-keyed gate can never recognise it -- which is why the
     # wave hold is disarmed at its source (``_expired_digest_holds``) instead.
     "_digest_flush_only": NOT_DELIVERY_STATE,
+    # A memory-wait expiry's report is owed in the store. It says who clears that mark,
+    # not where the outcome is: the parked states above say that.
+    "_report_owed": NOT_DELIVERY_STATE,
+    # An injection was given up on. Nothing in this process delivers the report
+    # again, so there is no parked delivery for a teardown to stop; it decides
+    # only whether a memory-wait expiry's owed mark may be cleared.
+    "_report_undelivered": NOT_DELIVERY_STATE,
     # Run bookkeeping these modules also write. None of them says where an outcome is.
     "_finalized": NOT_DELIVERY_STATE,
     "_reap_reason": NOT_DELIVERY_STATE,
@@ -3529,6 +3558,10 @@ class SubagentManager:
         # A snapshot whose cancel never ran is replaced by the next one.
         self._teardown_store_fences: dict[str, set[str]] = {}
         self._teardown_store_sweeps: list[tuple[str, set[str]]] = []
+        # Sweeps whose store read was refused: ``(key, fence, verb)``. Each fence
+        # stays in ``_teardown_store_sweeps`` (recording, and gating an expiry of
+        # the retired rows) until a reaper sweep's retry has read the store.
+        self._teardown_sweeps_owed: list[tuple[str, AbstractSet[str], str]] = []
         self._teardown_fence_lock = threading.Lock()
         self._memory_mode_for_session = memory_mode_for_session
         self._stage_boundary_for_scope = stage_boundary_for_scope
@@ -3965,6 +3998,7 @@ class SubagentManager:
             self._taskq_unavailable = None
             self._taskq_reopen_attempts = 0
             if self._reaper_task is not None and not self._reaper_task.done():
+                self._admission.taskq_schedule_owed_replay()
                 self._drain_queue()
 
     async def wait_taskq_ready(self) -> None:
@@ -4279,12 +4313,14 @@ class SubagentManager:
         the store attach, a dependency wake) returned without a pass, so this
         one pass is what picks up the rows they would have. Idempotent: a
         manager that was never held, or was already released, drains nothing
-        extra here.
+        extra here. The owed-report replay the store attach put off for the
+        same barrier is scheduled here too.
         """
         if not self._queue_dispatch_held:
             return
         self._queue_dispatch_held = False
         self._drain_queue()
+        self._admission.taskq_schedule_owed_replay()
 
     async def _reconcile_orphans(self) -> None:
         return await self._monitor._reconcile_orphans_impl()
@@ -4828,8 +4864,9 @@ class SubagentManager:
                 )
                 if snapshot is None:
                     return "pending"
+                redelivered = snapshot.delivery_info()
                 delivered = await self._run_terminal_report(
-                    snapshot.delivery_info(),
+                    redelivered,
                     source="Completed run deletion",
                     injection_timeout_reason=("delivery timed out while deleting completed run"),
                     mark_delivered_on_success=False,
@@ -4837,6 +4874,7 @@ class SubagentManager:
                 if not delivered:
                     return "pending"
                 self._clear_report_failure(snapshot)
+                self._admission.taskq_clear_owed_report_if_delivered(redelivered)
             elif owner:
                 self.discard_report_failures(info.parent_session_key, owner)
         # The pop is only half of a dismissal, and the panel's durable half reads
@@ -4940,14 +4978,19 @@ class SubagentManager:
         """Retry retained terminal payloads for one live stage boundary."""
         retained = self._report_failure_payloads_for_boundary(parent, owner)
         for snapshot in retained:
+            # A memory-wait expiry's store mark is cleared by this retry when it
+            # gets through, as the first report would have; left set, the next
+            # start would report the expiry a second time.
+            redelivered = snapshot.delivery_info()
             delivered = await self._run_terminal_report(
-                snapshot.delivery_info(),
+                redelivered,
                 source="Stage boundary report retry",
                 injection_timeout_reason="delivery timed out while retrying stage boundary",
                 mark_delivered_on_success=False,
             )
             if delivered:
                 self._clear_report_failure(snapshot)
+                self._admission.taskq_clear_owed_report_if_delivered(redelivered)
         return bool(retained)
 
     def _peek_report_failures(self, parent: str, owner: str) -> int:
@@ -6580,8 +6623,12 @@ class SubagentManager:
     def _unqueue(self, agent_id: str, **kwargs: Any) -> dict | None:
         return self._cancellation._unqueue_impl(agent_id, **kwargs)
 
-    def _report_queued_stop(self, params: dict, *, error: str = "") -> None:
-        return self._cancellation._report_queued_stop_impl(params, error=error)
+    def _report_queued_stop(
+        self, params: dict, *, error: str = "", report_owed: bool = False
+    ) -> "asyncio.Task[bool] | None":
+        return self._cancellation._report_queued_stop_impl(
+            params, error=error, report_owed=report_owed
+        )
 
     async def cancel(self, agent_id: str) -> bool:
         return await self._cancellation.cancel_impl(agent_id)
@@ -6709,8 +6756,12 @@ class SubagentManager:
             )
         finally:
             # Recording stops only once the sweep's store read is behind it: a row
-            # a successor queues during the awaits above must still be spared.
+            # a successor queues during the awaits above must still be spared. A
+            # read the store refused keeps it recording for the reaper's retry.
             self._cancellation.release_teardown_snapshot(fence)
+
+    async def retry_owed_teardown_sweeps(self) -> int:
+        return await self._cancellation.retry_owed_teardown_sweeps_impl()
 
     async def cancel_all(self) -> None:
         return await self._cancellation.cancel_all_impl()
