@@ -1,9 +1,9 @@
 """Append-only learned per-agent cost store for dynamic sub-agent sizing.
 
 One JSONL line per completed run, written via atomic ``O_APPEND`` (race-free,
-no lock). The cap is computed at startup from ``read_learned_cost`` =
-``max(per-agent p90)`` over the last N samples; the log is FIFO-trimmed to the
-last N per agent both at startup and periodically.
+no lock). The cap is computed at startup from ``read_typical_cost`` = the
+median across agents of each agent's p50 over its last N samples; the log is
+FIFO-trimmed to the last N per agent both at startup and periodically.
 
 See ``dynamic-subagent-sizing.md`` §4.2 (storage) / §4.3 (aggregation).
 """
@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import statistics
 import tempfile
 import time
 from collections import deque
@@ -267,7 +268,7 @@ def read_learned_costs(
 ) -> dict[str, float]:
     """:func:`read_learned_costs_checked` without the completeness flag.
 
-    Feeds :func:`read_learned_cost`, which sizes the sub-agent cap.
+    Feeds :func:`read_typical_cost`, which sizes the sub-agent cap.
     """
     return read_learned_costs_checked(
         key, window=window, min_samples=min_samples, percentile=percentile
@@ -293,22 +294,22 @@ def cap_buckets(costs: Mapping[str, float]) -> dict[str, float]:
     return dict(heaviest)
 
 
-def read_learned_cost(
+def read_typical_cost(
     key: str,
     *,
     window: int = _DEFAULT_WINDOW,
     min_samples: int = _DEFAULT_MIN_SAMPLES,
-    percentile: float = _DEFAULT_PERCENTILE,
 ) -> float | None:
-    """Return ``max(per-agent p90)`` for *key* (``mem_gb``/``cpu_cores``), or None.
+    """Return what a typical run costs for *key* (``mem_gb``/``cpu_cores``), or None.
 
-    Per agent, take the p90 of the last ``window`` samples (only if it has at
-    least ``min_samples``), then the max across agents. Returns None when no
+    Per agent, take the p50 of the last ``window`` samples (only if it has at
+    least ``min_samples``), then the median across agents. Returns None when no
     agent qualifies — the caller falls back to the configured first-boot cost.
-    A percentile is outlier-robust, so a single pathological run can't dominate.
+    Medians at both levels keep the figure steady: an agent whose window holds a
+    few heavy build runs, or one heavy agent among light ones, does not move it.
     """
-    costs = read_learned_costs(key, window=window, min_samples=min_samples, percentile=percentile)
-    return max(costs.values()) if costs else None
+    costs = read_learned_costs(key, window=window, min_samples=min_samples, percentile=0.5)
+    return statistics.median(costs.values()) if costs else None
 
 
 def compact_cost_log(window: int = _DEFAULT_WINDOW) -> None:

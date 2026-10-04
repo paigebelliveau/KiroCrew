@@ -89,9 +89,11 @@ Kiro Crew doesn't hard-code how much an agent costs — it measures it:
 - At exit, one sample `{agent, mem_gb, cpu_cores, ts}` is appended to
   `~/.kiro/crew/subagents/cost_samples.jsonl`. The CPU figure is telemetry
   only; sizing reads `mem_gb`.
-- At the next startup, Kiro Crew takes the **p90 of the last N memory samples
-  per agent name** (robust to the occasional outlier run), then the worst case
-  across agent types, as the divisor.
+- At the next startup, Kiro Crew takes the **p50 of the last N memory samples
+  per agent name**, then the median across agent types, as the divisor: a
+  typical run, so one build-heavy agent does not price every slot. The live
+  guards (the per-spawn memory gate and the adaptive controller) handle the
+  heavy agent where it actually runs.
 
 The longer the gateway runs, the more accurate the learned cost becomes. The
 sample log is bounded to the last N records per agent (FIFO compaction at
