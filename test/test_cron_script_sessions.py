@@ -143,6 +143,7 @@ class TestOpenSession:
         assert req.full_url == "http://127.0.0.1:7788/api/chat/slots"
         assert json.loads(req.data) == {
             "name": "Nightly",
+            "title": "Nightly",
             "folder_id": "f9",
             "agent": "worker",
             "model": "sonnet",
@@ -169,9 +170,10 @@ class TestOpenSession:
         ctx.open_session(f"key {_FAKE_KEY} run")
 
         (req,) = gateway.seen
-        sent = json.loads(req.data)["name"]
-        assert _FAKE_KEY not in sent
-        assert sent.endswith(" run")
+        sent = json.loads(req.data)
+        assert _FAKE_KEY not in sent["name"]
+        assert sent["name"].endswith(" run")
+        assert sent["title"] == sent["name"]
 
 
 class TestSendToSession:

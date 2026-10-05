@@ -1214,6 +1214,7 @@ class ScriptContext:
             key: value
             for key, value in (
                 ("name", redact(name)),
+                ("title", redact(name)),
                 ("folder_id", folder_id),
                 ("agent", agent),
                 ("model", model),
